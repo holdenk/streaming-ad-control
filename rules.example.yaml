@@ -1,0 +1,31 @@
+# rules.example.yaml
+#
+# Copy this file to rules.yaml (or any path) and set RULES_FILE to point to it.
+# Each rule maps one or more title keywords to one or more Reddit ad group IDs.
+# Keyword matching is case-insensitive.
+#
+# Usage:
+#   export RULES_FILE=/path/to/rules.yaml
+#   python run.py
+
+rules:
+  - name: "Spark streams"
+    keywords:
+      - Spark
+    ad_group_ids:
+      - adg_spark_123
+
+  - name: "Home Assistant streams"
+    keywords:
+      - "home assistant"
+      - homeassistant
+    ad_group_ids:
+      - adg_ha_456
+      - adg_rpi_789
+
+  - name: "Python streams"
+    keywords:
+      - Python
+      - PyData
+    ad_group_ids:
+      - adg_python_101

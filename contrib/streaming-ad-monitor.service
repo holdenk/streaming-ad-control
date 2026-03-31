@@ -1,0 +1,75 @@
+# /etc/systemd/system/streaming-ad-monitor.service
+#
+# Systemd unit for the Twitch → Reddit Ads stream monitor.
+# Tested on Ubuntu 25.04+ (systemd 257+).
+#
+# Installation:
+#   1. Copy (or symlink) this file to /etc/systemd/system/streaming-ad-monitor.service
+#   2. Copy rules.example.yaml to /etc/streaming-ad-monitor/rules.yaml and edit it.
+#   3. Create /etc/streaming-ad-monitor/env and populate it (see EnvironmentFile below).
+#   4. sudo systemctl daemon-reload
+#   5. sudo systemctl enable --now streaming-ad-monitor
+#
+# Useful commands:
+#   sudo systemctl status streaming-ad-monitor
+#   sudo journalctl -u streaming-ad-monitor -f
+
+[Unit]
+Description=Twitch stream → Reddit Ads monitor
+Documentation=https://github.com/holdenk/streaming-ad-control
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# Run as an unprivileged user.  Create with:
+#   sudo useradd --system --no-create-home --shell /usr/sbin/nologin streaming-ad-monitor
+User=streaming-ad-monitor
+Group=streaming-ad-monitor
+
+# Secrets and required env vars live in this file (mode 640, owned root:streaming-ad-monitor).
+# Each line is KEY=value (no export, no quoting needed for simple values).
+#
+# Required entries:
+#   TWITCH_CLIENT_ID=...
+#   TWITCH_CLIENT_SECRET=...
+#   TWITCH_CHANNEL_LOGIN=...
+#   REDDIT_CLIENT_ID=...
+#   REDDIT_CLIENT_SECRET=...
+#   REDDIT_ADS_ACCOUNT_ID=...
+#
+# Optional (if not using RULES_FILE):
+#   REDDIT_AD_GROUP_ID=...
+#   TRIGGER_KEYWORD=Spark
+#   POLL_INTERVAL=60
+EnvironmentFile=/etc/streaming-ad-monitor/env
+
+# Path to the YAML rules file (see rules.example.yaml).
+# Remove or comment out this line to fall back to legacy single-rule env vars.
+Environment=RULES_FILE=/etc/streaming-ad-monitor/rules.yaml
+
+WorkingDirectory=/opt/streaming-ad-monitor
+
+ExecStart=/opt/streaming-ad-monitor/venv/bin/python /opt/streaming-ad-monitor/run.py
+
+# Restart policy: always restart on failure, with a small back-off.
+Restart=on-failure
+RestartSec=10s
+StartLimitInterval=5min
+StartLimitBurst=5
+
+# Security hardening
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectHome=yes
+ReadOnlyPaths=/etc/streaming-ad-monitor
+
+# Send stdout/stderr to the journal
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=streaming-ad-monitor
+
+[Install]
+WantedBy=multi-user.target
