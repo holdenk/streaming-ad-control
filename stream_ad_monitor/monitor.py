@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import Optional
+from typing import List, Optional
 
 from .config import Config
 from .reddit_ad_client import RedditAdClient
+from .rules import Rule
 from .twitch_client import TwitchClient
 
 logger = logging.getLogger(__name__)
@@ -19,16 +20,15 @@ def title_has_keyword(title: str, keyword: str) -> bool:
 
 
 class StreamAdMonitor:
-    """Polls Twitch and manages a Reddit ad group based on stream state.
+    """Polls Twitch and manages Reddit ad groups based on stream state.
 
-    State machine
-    -------------
-    - When the channel goes *live* **and** the title contains the trigger
-      keyword → enable the Reddit ad group.
-    - When the channel goes *offline* (or comes back live without the keyword)
-      → disable the Reddit ad group.
-    - Enables/disables are only issued on transitions to avoid redundant API
-      calls.
+    For each configured rule, the monitor independently tracks whether that
+    rule's ad groups are currently enabled.  A rule's ad groups are enabled
+    when the stream is live **and** the title matches at least one of the
+    rule's keywords, and disabled otherwise.
+
+    State transitions only — API calls are issued at most once per edge so
+    there are no redundant enable/disable requests.
     """
 
     def __init__(
@@ -47,9 +47,8 @@ class StreamAdMonitor:
             config.reddit_client_secret,
             config.reddit_ads_account_id,
         )
-        # Track whether the ad is currently enabled so we only call the API on
-        # state transitions.
-        self._ad_enabled: bool = False
+        # Per-rule enabled flag; indexed in the same order as config.rules.
+        self._rule_enabled: List[bool] = [False] * len(config.rules)
 
     # ------------------------------------------------------------------
     # Single poll cycle (public for testability)
@@ -58,36 +57,43 @@ class StreamAdMonitor:
     def check(self) -> None:
         """Perform a single poll cycle: inspect stream state and act if needed."""
         stream = self.twitch.get_stream(self.config.twitch_channel_login)
-        should_enable = (
-            stream is not None
-            and title_has_keyword(
-                stream.get("title", ""), self.config.trigger_keyword
-            )
-        )
+        title = stream.get("title", "") if stream is not None else ""
 
-        if should_enable and not self._ad_enabled:
-            logger.info(
-                "Stream is live with matching title '%s'. Enabling Reddit ad group.",
-                stream.get("title"),
-            )
-            self.reddit.enable_ad_group(self.config.reddit_ad_group_id)
-            self._ad_enabled = True
+        for idx, rule in enumerate(self.config.rules):
+            should_enable = stream is not None and rule.matches_title(title)
+            currently_enabled = self._rule_enabled[idx]
 
-        elif not should_enable and self._ad_enabled:
-            reason = "stream ended" if stream is None else "title no longer matches"
-            logger.info(
-                "Ad group should be disabled (%s). Disabling Reddit ad group.",
-                reason,
-            )
-            self.reddit.disable_ad_group(self.config.reddit_ad_group_id)
-            self._ad_enabled = False
+            if should_enable and not currently_enabled:
+                logger.info(
+                    "Rule '%s': stream is live with matching title '%s'. "
+                    "Enabling %d ad group(s).",
+                    rule.name,
+                    title,
+                    len(rule.ad_group_ids),
+                )
+                for ad_group_id in rule.ad_group_ids:
+                    self.reddit.enable_ad_group(ad_group_id)
+                self._rule_enabled[idx] = True
 
-        else:
-            logger.debug(
-                "No state change (ad_enabled=%s, should_enable=%s).",
-                self._ad_enabled,
-                should_enable,
-            )
+            elif not should_enable and currently_enabled:
+                reason = "stream ended" if stream is None else "title no longer matches"
+                logger.info(
+                    "Rule '%s': disabling %d ad group(s) (%s).",
+                    rule.name,
+                    len(rule.ad_group_ids),
+                    reason,
+                )
+                for ad_group_id in rule.ad_group_ids:
+                    self.reddit.disable_ad_group(ad_group_id)
+                self._rule_enabled[idx] = False
+
+            else:
+                logger.debug(
+                    "Rule '%s': no state change (enabled=%s, should_enable=%s).",
+                    rule.name,
+                    currently_enabled,
+                    should_enable,
+                )
 
     # ------------------------------------------------------------------
     # Continuous monitoring loop
@@ -99,10 +105,14 @@ class StreamAdMonitor:
         Args:
             stop_after: If given, stop after this many poll cycles.
         """
+        rule_summary = ", ".join(
+            f"'{r.name}' ({r.keywords})" for r in self.config.rules
+        )
         logger.info(
-            "Starting monitor for channel '%s' (keyword=%r, interval=%ds).",
+            "Starting monitor for channel '%s' with %d rule(s): [%s] (interval=%ds).",
             self.config.twitch_channel_login,
-            self.config.trigger_keyword,
+            len(self.config.rules),
+            rule_summary,
             self.config.poll_interval,
         )
         iteration = 0
