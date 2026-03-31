@@ -279,3 +279,66 @@ def test_run_sleeps_between_polls():
     # Should sleep twice between 3 polls (not after the last one)
     assert mock_sleep.call_count == 2
     assert mock_sleep.call_args == call(monitor.config.poll_interval)
+
+
+# ---------------------------------------------------------------------------
+# StreamAdMonitor.disable_all – startup housekeeping
+# ---------------------------------------------------------------------------
+
+
+def test_disable_all_calls_disable_for_every_ad_group():
+    """disable_all() should call disable_ad_group for every ad group across all rules."""
+    rules = [
+        Rule(name="Spark", keywords=["Spark"], ad_group_ids=["adg_spark"]),
+        Rule(name="HomeAssistant", keywords=["home assistant"], ad_group_ids=["adg_ha", "adg_rpi"]),
+    ]
+    monitor, twitch, reddit = _make_monitor([], rules=rules)
+    monitor.disable_all()
+
+    assert reddit.disable_ad_group.call_count == 3
+    reddit.disable_ad_group.assert_any_call("adg_spark")
+    reddit.disable_ad_group.assert_any_call("adg_ha")
+    reddit.disable_ad_group.assert_any_call("adg_rpi")
+    reddit.enable_ad_group.assert_not_called()
+
+
+def test_disable_all_resets_rule_enabled_flags():
+    """disable_all() should reset _rule_enabled to all-False even if flags were True."""
+    rules = [
+        Rule(name="Spark", keywords=["Spark"], ad_group_ids=["adg_spark"]),
+        Rule(name="HA", keywords=["home assistant"], ad_group_ids=["adg_ha"]),
+    ]
+    monitor, twitch, reddit = _make_monitor([], rules=rules)
+    monitor._rule_enabled = [True, True]
+
+    monitor.disable_all()
+
+    assert monitor._rule_enabled == [False, False]
+
+
+def test_disable_all_tolerates_api_errors():
+    """disable_all() should log and continue even if one disable call fails."""
+    rules = [
+        Rule(name="Spark", keywords=["Spark"], ad_group_ids=["adg_spark"]),
+        Rule(name="HA", keywords=["home assistant"], ad_group_ids=["adg_ha"]),
+    ]
+    monitor, twitch, reddit = _make_monitor([], rules=rules)
+    reddit.disable_ad_group.side_effect = [RuntimeError("API error"), None]
+
+    monitor.disable_all()  # must not raise
+
+    assert reddit.disable_ad_group.call_count == 2
+    assert monitor._rule_enabled == [False, False]
+
+
+def test_run_calls_disable_all_before_first_poll():
+    """run() must call disable_all() before any poll cycle."""
+    monitor, twitch, reddit = _make_monitor([None])
+    call_order = []
+    reddit.disable_ad_group.side_effect = lambda *a, **kw: call_order.append("disable")
+    twitch.get_stream.side_effect = lambda *a, **kw: call_order.append("poll") or None
+
+    with patch("time.sleep"):
+        monitor.run(stop_after=1)
+
+    assert call_order[0] == "disable", "disable_all must be called before the first poll"

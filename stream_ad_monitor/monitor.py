@@ -96,11 +96,41 @@ class StreamAdMonitor:
                 )
 
     # ------------------------------------------------------------------
+    # Startup housekeeping
+    # ------------------------------------------------------------------
+
+    def disable_all(self) -> None:
+        """Disable every ad group across all rules and reset internal state.
+
+        Called once at startup to ensure no stale ads are left running from a
+        previous invocation that may have crashed or been stopped mid-session.
+        """
+        logger.info(
+            "Startup: disabling all ad groups across %d rule(s) to ensure clean state.",
+            len(self.config.rules),
+        )
+        for idx, rule in enumerate(self.config.rules):
+            for ad_group_id in rule.ad_group_ids:
+                try:
+                    self.reddit.disable_ad_group(ad_group_id)
+                except Exception:
+                    logger.exception(
+                        "Startup: failed to disable ad group '%s' for rule '%s'; continuing.",
+                        ad_group_id,
+                        rule.name,
+                    )
+            self._rule_enabled[idx] = False
+
+    # ------------------------------------------------------------------
     # Continuous monitoring loop
     # ------------------------------------------------------------------
 
     def run(self, stop_after: Optional[int] = None) -> None:
         """Poll indefinitely (or *stop_after* iterations, useful for testing).
+
+        On first call, all ad groups are unconditionally disabled so that any
+        ads left running from a previous (possibly crashed) session are cleaned
+        up before the state machine takes over.
 
         Args:
             stop_after: If given, stop after this many poll cycles.
@@ -115,6 +145,7 @@ class StreamAdMonitor:
             rule_summary,
             self.config.poll_interval,
         )
+        self.disable_all()
         iteration = 0
         while stop_after is None or iteration < stop_after:
             try:
