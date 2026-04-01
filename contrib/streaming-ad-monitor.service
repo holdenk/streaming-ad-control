@@ -43,6 +43,7 @@ Group=streaming-ad-monitor
 #   REDDIT_AD_GROUP_ID=...
 #   TRIGGER_KEYWORD=Spark
 #   POLL_INTERVAL=60
+#   LOG_LEVEL=INFO               # DEBUG for verbose output (default INFO)
 EnvironmentFile=/etc/streaming-ad-monitor/env
 
 # Path to the YAML rules file (see rules.example.yaml).

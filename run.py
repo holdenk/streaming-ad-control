@@ -14,6 +14,7 @@ Rules can be configured in two ways:
     export RULES_FILE=/path/to/rules.yaml  # see rules.example.yaml
     # Optional:
     export POLL_INTERVAL=60                # seconds between polls (default 60)
+    export LOG_LEVEL=DEBUG                 # DEBUG, INFO, WARNING, ERROR (default INFO)
 
     python run.py
 
@@ -29,17 +30,20 @@ Rules can be configured in two ways:
     # Optional:
     export POLL_INTERVAL=60          # seconds between polls (default 60)
     export TRIGGER_KEYWORD=Spark     # keyword to watch for in title (default Spark)
+    export LOG_LEVEL=DEBUG           # DEBUG, INFO, WARNING, ERROR (default INFO)
 
     python run.py
 """
 
 import logging
+import os
 
 from stream_ad_monitor.config import Config
 from stream_ad_monitor.monitor import StreamAdMonitor
 
+_log_level = os.environ.get("LOG_LEVEL", "INFO").upper()
 logging.basicConfig(
-    level=logging.INFO,
+    level=getattr(logging, _log_level, logging.INFO),
     format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
 )
 
