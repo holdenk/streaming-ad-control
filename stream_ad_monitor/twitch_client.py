@@ -7,6 +7,8 @@ from typing import Optional
 
 import requests
 
+from . import mask_credential
+
 logger = logging.getLogger(__name__)
 
 _TOKEN_URL = "https://id.twitch.tv/oauth2/token"
@@ -28,6 +30,10 @@ class TwitchClient:
 
     def authenticate(self) -> None:
         """Fetch an app-access token using client-credentials flow."""
+        logger.debug(
+            "Attempting Twitch auth with client_id=%s",
+            mask_credential(self.client_id),
+        )
         response = self._session.post(
             _TOKEN_URL,
             params={
@@ -36,6 +42,12 @@ class TwitchClient:
                 "grant_type": "client_credentials",
             },
         )
+        if not response.ok:
+            logger.error(
+                "Twitch auth failed: status=%d, body=%s",
+                response.status_code,
+                response.text[:500],
+            )
         response.raise_for_status()
         self._access_token = response.json()["access_token"]
         logger.debug("Twitch authentication successful.")
@@ -61,6 +73,24 @@ class TwitchClient:
             params={"user_login": user_login},
             headers=headers,
         )
+
+        if response.status_code == 401:
+            logger.warning("Twitch API returned 401; re-authenticating and retrying once.")
+            self._access_token = None
+            self.authenticate()
+            headers["Authorization"] = f"Bearer {self._access_token}"
+            response = self._session.get(
+                f"{_HELIX_BASE}/streams",
+                params={"user_login": user_login},
+                headers=headers,
+            )
+
+        if not response.ok:
+            logger.error(
+                "Twitch API error: status=%d, body=%s",
+                response.status_code,
+                response.text[:500],
+            )
         response.raise_for_status()
         data = response.json().get("data", [])
         return data[0] if data else None

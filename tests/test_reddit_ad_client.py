@@ -34,6 +34,20 @@ def test_authenticate_sets_access_token():
 
 
 @resp_lib.activate
+def test_authenticate_raises_and_logs_on_failure():
+    """Auth failure should log the response body before raising."""
+    resp_lib.add(
+        resp_lib.POST,
+        _TOKEN_URL,
+        json={"error": "invalid_client"},
+        status=403,
+    )
+    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
+    with pytest.raises(Exception, match="403"):
+        client.authenticate()
+
+
+@resp_lib.activate
 def test_enable_ad_group_sends_active_status():
     _add_token_response()
     resp_lib.add(
@@ -89,9 +103,52 @@ def test_patch_ad_group_auto_authenticates():
 
 
 @resp_lib.activate
+def test_patch_ad_group_retries_on_401():
+    """A 401 from the ads API should trigger re-auth and one retry."""
+    _add_token_response()
+    # First PATCH returns 401
+    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=401)
+    # Re-auth token
+    _add_token_response()
+    # Retry PATCH succeeds
+    resp_lib.add(
+        resp_lib.PATCH,
+        _ad_group_url(),
+        json={"id": _AD_GROUP_ID, "status": "ACTIVE"},
+        status=200,
+    )
+    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
+    result = client.enable_ad_group(_AD_GROUP_ID)
+    assert result["status"] == "ACTIVE"
+    # auth + patch(401) + re-auth + patch(200)
+    assert len(resp_lib.calls) == 4
+
+
+@resp_lib.activate
+def test_patch_ad_group_retries_on_403():
+    """A 403 from the ads API should trigger re-auth and one retry."""
+    _add_token_response()
+    # First PATCH returns 403
+    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=403)
+    # Re-auth token
+    _add_token_response()
+    # Retry PATCH succeeds
+    resp_lib.add(
+        resp_lib.PATCH,
+        _ad_group_url(),
+        json={"id": _AD_GROUP_ID, "status": "PAUSED"},
+        status=200,
+    )
+    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
+    result = client.disable_ad_group(_AD_GROUP_ID)
+    assert result["status"] == "PAUSED"
+    assert len(resp_lib.calls) == 4
+
+
+@resp_lib.activate
 def test_patch_ad_group_raises_on_http_error():
     _add_token_response()
-    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=403)
+    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=500)
     client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
     with pytest.raises(Exception):
         client.enable_ad_group(_AD_GROUP_ID)

@@ -7,6 +7,8 @@ from typing import Optional
 
 import requests
 
+from . import mask_credential
+
 logger = logging.getLogger(__name__)
 
 _TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
@@ -37,12 +39,22 @@ class RedditAdClient:
 
     def authenticate(self) -> None:
         """Fetch an OAuth2 access token using client-credentials flow."""
+        logger.debug(
+            "Attempting Reddit auth with client_id=%s",
+            mask_credential(self.client_id),
+        )
         response = self._session.post(
             _TOKEN_URL,
             auth=(self.client_id, self.client_secret),
             data={"grant_type": "client_credentials"},
             headers={"User-Agent": "stream-ad-monitor/1.0"},
         )
+        if not response.ok:
+            logger.error(
+                "Reddit auth failed: status=%d, body=%s",
+                response.status_code,
+                response.text[:500],
+            )
         response.raise_for_status()
         self._access_token = response.json()["access_token"]
         logger.debug("Reddit Ads authentication successful.")
@@ -67,6 +79,29 @@ class RedditAdClient:
             json={"status": status},
             headers=headers,
         )
+
+        if response.status_code in (401, 403):
+            logger.warning(
+                "Reddit API returned %d for ad group %s; re-authenticating and retrying once.",
+                response.status_code,
+                ad_group_id,
+            )
+            self._access_token = None
+            self.authenticate()
+            headers["Authorization"] = f"Bearer {self._access_token}"
+            response = self._session.patch(
+                url,
+                json={"status": status},
+                headers=headers,
+            )
+
+        if not response.ok:
+            logger.error(
+                "Reddit API error: status=%d, url=%s, body=%s",
+                response.status_code,
+                url,
+                response.text[:500],
+            )
         response.raise_for_status()
         return response.json()
 

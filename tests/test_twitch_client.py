@@ -28,6 +28,20 @@ def test_authenticate_sets_access_token():
 
 
 @resp_lib.activate
+def test_authenticate_raises_and_logs_on_failure():
+    """Auth failure should log the response body before raising."""
+    resp_lib.add(
+        resp_lib.POST,
+        _TOKEN_URL,
+        json={"message": "invalid client"},
+        status=403,
+    )
+    client = TwitchClient("cid", "csecret")
+    with pytest.raises(Exception, match="403"):
+        client.authenticate()
+
+
+@resp_lib.activate
 def test_get_stream_returns_stream_when_live():
     _add_token_response()
     stream_data = {
@@ -132,9 +146,31 @@ def test_get_stream_auto_authenticates_if_no_token():
 
 
 @resp_lib.activate
-def test_get_stream_raises_on_http_error():
+def test_get_stream_retries_on_401():
+    """A 401 from the streams API should trigger re-auth and one retry."""
     _add_token_response()
+    # First GET returns 401
     resp_lib.add(resp_lib.GET, _STREAMS_URL, status=401)
+    # Re-auth token
+    _add_token_response()
+    # Retry GET succeeds
+    resp_lib.add(
+        resp_lib.GET,
+        _STREAMS_URL,
+        json={"data": [{"id": "1", "user_login": "ch", "title": "t", "type": "live"}]},
+        status=200,
+    )
+    client = TwitchClient("cid", "csecret")
+    result = client.get_stream("ch")
+    assert result is not None
+    # auth + get(401) + re-auth + get(200)
+    assert len(resp_lib.calls) == 4
+
+
+@resp_lib.activate
+def test_get_stream_raises_on_non_401_http_error():
+    _add_token_response()
+    resp_lib.add(resp_lib.GET, _STREAMS_URL, status=500)
     client = TwitchClient("cid", "csecret")
     with pytest.raises(Exception):
         client.get_stream("ch")

@@ -5,7 +5,8 @@ import textwrap
 import pytest
 from unittest.mock import patch
 
-from stream_ad_monitor.config import Config
+from stream_ad_monitor import mask_credential
+from stream_ad_monitor.config import Config, _sanitize
 
 
 # ---------------------------------------------------------------------------
@@ -24,6 +25,56 @@ BASE_ENV = {
 
 # Legacy single-rule env vars
 LEGACY_ENV = {**BASE_ENV, "REDDIT_AD_GROUP_ID": "adg_456"}
+
+
+# ---------------------------------------------------------------------------
+# _sanitize() tests
+# ---------------------------------------------------------------------------
+
+
+def test_sanitize_strips_double_quotes():
+    assert _sanitize('"abc123"') == "abc123"
+
+
+def test_sanitize_strips_single_quotes():
+    assert _sanitize("'abc123'") == "abc123"
+
+
+def test_sanitize_strips_whitespace_and_cr():
+    assert _sanitize("  abc123\r\n") == "abc123"
+
+
+def test_sanitize_strips_quotes_and_whitespace():
+    assert _sanitize('  "abc123"  \r') == "abc123"
+
+
+def test_sanitize_preserves_clean_values():
+    assert _sanitize("abc123") == "abc123"
+
+
+def test_sanitize_preserves_mismatched_quotes():
+    assert _sanitize("'abc123\"") == "'abc123\""
+
+
+# ---------------------------------------------------------------------------
+# mask_credential() tests
+# ---------------------------------------------------------------------------
+
+
+def test_mask_short_value():
+    assert mask_credential("ab") == "a***b"
+
+
+def test_mask_single_char():
+    assert mask_credential("a") == "***"
+
+
+def test_mask_long_value():
+    assert mask_credential("abcdefghij") == "abc***hij"
+
+
+def test_mask_exactly_eight():
+    assert mask_credential("12345678") == "1***8"
 
 
 # ---------------------------------------------------------------------------
@@ -88,6 +139,15 @@ def test_config_raises_when_required_var_missing(missing_key):
     with patch.dict(os.environ, env, clear=True):
         with pytest.raises(ValueError, match=missing_key):
             Config()
+
+
+def test_config_sanitizes_quoted_env_vars():
+    """Values with surrounding quotes should be stripped automatically."""
+    env = {k: f'"{v}"' for k, v in LEGACY_ENV.items()}
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert cfg.twitch_client_id == "twitch_id"
+    assert cfg.reddit_client_id == "reddit_id"
 
 
 # ---------------------------------------------------------------------------
