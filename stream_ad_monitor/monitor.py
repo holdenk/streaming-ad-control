@@ -46,6 +46,7 @@ class StreamAdMonitor:
             config.reddit_client_id,
             config.reddit_client_secret,
             config.reddit_ads_account_id,
+            reddit_username=config.reddit_username,
         )
         # Per-rule enabled flag; indexed in the same order as config.rules.
         self._rule_enabled: List[bool] = [False] * len(config.rules)

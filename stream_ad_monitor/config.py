@@ -53,6 +53,7 @@ class Config:
         self.reddit_client_id: str = _require("REDDIT_CLIENT_ID")
         self.reddit_client_secret: str = _require("REDDIT_CLIENT_SECRET")
         self.reddit_ads_account_id: str = _require("REDDIT_ADS_ACCOUNT_ID")
+        self.reddit_username: str = os.environ.get("REDDIT_USERNAME", "")
 
         # How often to poll Twitch (seconds)
         self.poll_interval: int = int(os.environ.get("POLL_INTERVAL", "60"))

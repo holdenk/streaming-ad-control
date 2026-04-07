@@ -26,12 +26,19 @@ class RedditAdClient:
         client_id: str,
         client_secret: str,
         account_id: str,
+        reddit_username: str = "",
     ) -> None:
         self.client_id = client_id
         self.client_secret = client_secret
         self.account_id = account_id
         self._access_token: Optional[str] = None
         self._session = requests.Session()
+        # Reddit requires: <platform>:<app_id>:<version> (by /u/<username>)
+        # See https://github.com/reddit-archive/reddit/wiki/API
+        ua = "linux:stream-ad-monitor:1.0"
+        if reddit_username:
+            ua += f" (by /u/{reddit_username})"
+        self._session.headers["User-Agent"] = ua
 
     # ------------------------------------------------------------------
     # Authentication
@@ -47,7 +54,6 @@ class RedditAdClient:
             _TOKEN_URL,
             auth=(self.client_id, self.client_secret),
             data={"grant_type": "client_credentials"},
-            headers={"User-Agent": "stream-ad-monitor/1.0"},
         )
         if not response.ok:
             logger.error(
@@ -71,7 +77,6 @@ class RedditAdClient:
         headers = {
             "Authorization": f"Bearer {self._access_token}",
             "Content-Type": "application/json",
-            "User-Agent": "stream-ad-monitor/1.0",
         }
         url = f"{_ADS_BASE}/accounts/{self.account_id}/ad_groups/{ad_group_id}"
         response = self._session.patch(
