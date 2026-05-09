@@ -2,19 +2,22 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import logging
+from dataclasses import dataclass
 from typing import List
 
 import yaml
 
+logger = logging.getLogger(__name__)
+
 
 @dataclass
 class Rule:
-    """One monitoring rule: match any keyword → enable all listed ad groups."""
+    """One monitoring rule: match any keyword → enable all listed campaigns."""
 
     name: str
     keywords: List[str]
-    ad_group_ids: List[str]
+    campaign_ids: List[str]
 
     def matches_title(self, title: str) -> bool:
         """Return True when any keyword appears in *title* (case-insensitive)."""
@@ -31,15 +34,18 @@ def load_rules_from_yaml(path: str) -> List[Rule]:
           - name: "Spark streams"
             keywords:
               - Spark
-            ad_group_ids:
-              - adg_spark_123
+            campaign_ids:
+              - 2470329120103230906
           - name: "Home Assistant"
             keywords:
               - "home assistant"
               - homeassistant
-            ad_group_ids:
-              - adg_ha_456
-              - adg_rpi_789
+            campaign_ids:
+              - 2470329120103231000
+              - 2470329120103231001
+
+    The legacy field name ``ad_group_ids`` is still accepted (with a
+    deprecation warning) — the value is treated as a list of campaign IDs.
 
     Raises:
         ValueError: If the file contains no rules or a rule is malformed.
@@ -55,13 +61,22 @@ def load_rules_from_yaml(path: str) -> List[Rule]:
     for idx, raw in enumerate(raw_rules):
         name = raw.get("name", f"rule_{idx}")
         keywords = raw.get("keywords", [])
-        ad_group_ids = raw.get("ad_group_ids", [])
+        campaign_ids = raw.get("campaign_ids")
+        if campaign_ids is None and "ad_group_ids" in raw:
+            logger.warning(
+                "Rule '%s' uses deprecated 'ad_group_ids'; rename to "
+                "'campaign_ids' (the value is treated as a campaign ID list).",
+                name,
+            )
+            campaign_ids = raw["ad_group_ids"]
+        if campaign_ids is None:
+            campaign_ids = []
 
         if not keywords:
             raise ValueError(f"Rule '{name}' has no keywords.")
-        if not ad_group_ids:
-            raise ValueError(f"Rule '{name}' has no ad_group_ids.")
+        if not campaign_ids:
+            raise ValueError(f"Rule '{name}' has no campaign_ids.")
 
-        rules.append(Rule(name=name, keywords=keywords, ad_group_ids=ad_group_ids))
+        rules.append(Rule(name=name, keywords=keywords, campaign_ids=campaign_ids))
 
     return rules

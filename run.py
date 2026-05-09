@@ -1,37 +1,26 @@
 #!/usr/bin/env python3
 """Entry point for the stream-ad monitor agent.
 
-Rules can be configured in two ways:
+Reddit auth: a headless Chromium logs into ads.reddit.com with username +
+password. Cookies + localStorage are persisted to REDDIT_COOKIE_JAR (if set)
+so subsequent runs reuse the session. 2FA is not supported.
 
-**Option A – YAML rules file (recommended, supports multiple rules):**
+Required env vars:
+  TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_CHANNEL_LOGIN
+  REDDIT_USERNAME, REDDIT_PASSWORD
+  RULES_FILE   — YAML rules file (recommended), OR
+  REDDIT_CAMPAIGN_ID + optional TRIGGER_KEYWORD (legacy single-rule mode)
 
-    export TWITCH_CLIENT_ID=...
-    export TWITCH_CLIENT_SECRET=...
-    export TWITCH_CHANNEL_LOGIN=your_channel
-    export REDDIT_CLIENT_ID=...
-    export REDDIT_CLIENT_SECRET=...
-    export REDDIT_ADS_ACCOUNT_ID=...
-    export RULES_FILE=/path/to/rules.yaml  # see rules.example.yaml
-    # Optional:
-    export POLL_INTERVAL=60                # seconds between polls (default 60)
-    export LOG_LEVEL=DEBUG                 # DEBUG, INFO, WARNING, ERROR (default INFO)
+Optional env vars:
+  REDDIT_COOKIE_JAR           Persist session to this file path between runs
+  REDDIT_PATCH_BODY_PAUSE     Override the JSON body for pause (default
+                              '{"configured_status": "PAUSED"}')
+  REDDIT_PATCH_BODY_RESUME    Override the JSON body for resume (default
+                              '{"configured_status": "ACTIVE"}')
+  POLL_INTERVAL               Seconds between Twitch polls (default 60)
+  LOG_LEVEL                   DEBUG, INFO, WARNING, ERROR (default INFO)
 
-    python run.py
-
-**Option B – Legacy single-rule env vars (backward compatible):**
-
-    export TWITCH_CLIENT_ID=...
-    export TWITCH_CLIENT_SECRET=...
-    export TWITCH_CHANNEL_LOGIN=your_channel
-    export REDDIT_CLIENT_ID=...
-    export REDDIT_CLIENT_SECRET=...
-    export REDDIT_ADS_ACCOUNT_ID=...
-    export REDDIT_AD_GROUP_ID=...
-    # Optional:
-    export POLL_INTERVAL=60          # seconds between polls (default 60)
-    export TRIGGER_KEYWORD=Spark     # keyword to watch for in title (default Spark)
-    export LOG_LEVEL=DEBUG           # DEBUG, INFO, WARNING, ERROR (default INFO)
-
+Usage:
     python run.py
 """
 

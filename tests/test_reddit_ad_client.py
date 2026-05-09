@@ -1,154 +1,331 @@
-"""Tests for stream_ad_monitor.reddit_ad_client."""
+"""Tests for stream_ad_monitor.reddit_ad_client.
+
+The selenium WebDriver is mocked; tests assert the script payload sent to
+``execute_async_script`` and the UI-click fallback path.
+"""
+
+import json
+from unittest.mock import MagicMock
 
 import pytest
-import responses as resp_lib
 
 from stream_ad_monitor.reddit_ad_client import RedditAdClient
 
-_TOKEN_URL = "https://www.reddit.com/api/v1/access_token"
-_ADS_BASE = "https://ads-api.reddit.com/api/v3"
-_ACCOUNT_ID = "acct_123"
-_AD_GROUP_ID = "adg_456"
-_FAKE_TOKEN = "fake_reddit_token"
+
+_CAMPAIGN_ID = "2470329120103230906"
 
 
-def _ad_group_url():
-    return f"{_ADS_BASE}/accounts/{_ACCOUNT_ID}/ad_groups/{_AD_GROUP_ID}"
+def _fake_driver(
+    *,
+    fetch_status: int = 200,
+    fetch_body: str = '{"ok": true}',
+    current_url: str = "https://ads.reddit.com/dashboard",
+):
+    """Build a mock WebDriver whose execute_async_script returns a fetch result."""
+    driver = MagicMock()
+    driver.current_url = current_url
+    driver.execute_async_script.return_value = {
+        "status": fetch_status,
+        "body": fetch_body,
+    }
+    driver.execute_script.return_value = {}
+    driver.get_cookies.return_value = []
+    driver.get.return_value = None
+    return driver
 
 
-def _add_token_response():
-    resp_lib.add(
-        resp_lib.POST,
-        _TOKEN_URL,
-        json={"access_token": _FAKE_TOKEN, "token_type": "bearer"},
-        status=200,
+def _make_client(driver=None, **kwargs):
+    return RedditAdClient(
+        username=kwargs.pop("username", "u"),
+        password=kwargs.pop("password", "p"),
+        driver=driver if driver is not None else _fake_driver(),
+        **kwargs,
     )
 
 
-@resp_lib.activate
-def test_authenticate_sets_access_token():
-    _add_token_response()
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
+# ---------------------------------------------------------------------------
+# Construction
+# ---------------------------------------------------------------------------
+
+
+def test_init_rejects_missing_credentials():
+    with pytest.raises(ValueError, match="username and password"):
+        RedditAdClient(username="", password="p")
+    with pytest.raises(ValueError, match="username and password"):
+        RedditAdClient(username="u", password="")
+
+
+# ---------------------------------------------------------------------------
+# Authentication flows
+# ---------------------------------------------------------------------------
+
+
+def test_authenticate_is_idempotent_when_already_authenticated():
+    driver = _fake_driver()
+    client = _make_client(driver=driver)
+    client._authenticated = True
     client.authenticate()
-    assert client._access_token == _FAKE_TOKEN
+    driver.get.assert_not_called()  # no login flow re-runs
 
 
-@resp_lib.activate
-def test_authenticate_raises_and_logs_on_failure():
-    """Auth failure should log the response body before raising."""
-    resp_lib.add(
-        resp_lib.POST,
-        _TOKEN_URL,
-        json={"error": "invalid_client"},
-        status=403,
+def test_authenticate_no_cookie_jar_falls_through_to_form_login(monkeypatch):
+    """Without cookie_jar_path, restore is skipped and login is attempted."""
+    driver = _fake_driver(current_url="https://ads.reddit.com/dashboard")
+    client = _make_client(driver=driver)
+    monkeypatch.setattr(client, "_login_via_form", MagicMock(name="login"))
+    client.authenticate()
+    client._login_via_form.assert_called_once()
+    assert client._authenticated is True
+
+
+def test_authenticate_restores_session_when_cookie_jar_loads_and_dashboard_accepts(
+    tmp_path, monkeypatch
+):
+    jar = tmp_path / "jar.json"
+    jar.write_text(json.dumps({"cookies": [{"name": "reddit_session", "value": "x"}], "local_storage": {}}))
+    driver = _fake_driver(current_url="https://ads.reddit.com/dashboard")
+    client = _make_client(driver=driver, cookie_jar_path=str(jar))
+    monkeypatch.setattr(client, "_login_via_form", MagicMock(name="login"))
+
+    client.authenticate()
+
+    client._login_via_form.assert_not_called()
+    assert client._authenticated is True
+
+
+def test_authenticate_falls_back_to_form_when_restored_session_is_dead(
+    tmp_path, monkeypatch
+):
+    jar = tmp_path / "jar.json"
+    jar.write_text(json.dumps({"cookies": [{"name": "reddit_session", "value": "x"}], "local_storage": {}}))
+    # Restored cookies but the dashboard kicks us back to /login.
+    driver = _fake_driver(current_url="https://www.reddit.com/login/")
+    client = _make_client(driver=driver, cookie_jar_path=str(jar))
+    monkeypatch.setattr(client, "_login_via_form", MagicMock(name="login"))
+    monkeypatch.setattr(client, "_save_session", MagicMock(name="save"))
+
+    client.authenticate()
+
+    client._login_via_form.assert_called_once()
+    client._save_session.assert_called_once()
+
+
+def test_authenticate_skips_restore_when_jar_file_missing(tmp_path, monkeypatch):
+    nonexistent = tmp_path / "missing.json"
+    driver = _fake_driver()
+    client = _make_client(driver=driver, cookie_jar_path=str(nonexistent))
+    monkeypatch.setattr(client, "_login_via_form", MagicMock(name="login"))
+    client.authenticate()
+    client._login_via_form.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Campaign control – requests-based PATCH path
+# ---------------------------------------------------------------------------
+
+
+def _stub_http_session(client, status=200, body='{"ok":true}'):
+    """Pre-install a mock requests.Session on the client so _build_http_session
+    isn't called and the test asserts on the mock's .patch() invocation."""
+    mock_response = MagicMock(name="response")
+    mock_response.status_code = status
+    mock_response.text = body
+    session = MagicMock(name="http_session")
+    session.patch.return_value = mock_response
+    client._http_session = session
+    return session
+
+
+def test_disable_campaign_patches_with_pause_event_type():
+    client = _make_client()
+    client._authenticated = True
+    session = _stub_http_session(client, body='{"id":1}')
+
+    client.disable_campaign(_CAMPAIGN_ID)
+
+    args, kwargs = session.patch.call_args
+    url = args[0]
+    assert url == f"https://ads-api.reddit.com/api/v3/campaigns/{_CAMPAIGN_ID}"
+    assert b"PAUSED" in kwargs["data"]
+    assert kwargs["headers"]["X-Event-Type"] == "manual_pause"
+    assert kwargs["headers"]["Content-Type"] == "application/json"
+
+
+def test_enable_campaign_patches_with_activate_event_type():
+    client = _make_client()
+    client._authenticated = True
+    session = _stub_http_session(client)
+
+    client.enable_campaign(_CAMPAIGN_ID)
+
+    _, kwargs = session.patch.call_args
+    assert b"ACTIVE" in kwargs["data"]
+    assert kwargs["headers"]["X-Event-Type"] == "manual_activate"
+
+
+def test_authenticate_called_lazily_on_first_state_change(monkeypatch):
+    driver = _fake_driver()
+    client = _make_client(driver=driver)
+    monkeypatch.setattr(client, "_login_via_form", MagicMock(name="login"))
+    monkeypatch.setattr(client, "_save_session", MagicMock(name="save"))
+    monkeypatch.setattr(
+        client, "_build_http_session", MagicMock(return_value=_stub_http_session(client))
     )
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    with pytest.raises(Exception, match="403"):
-        client.authenticate()
+
+    assert client._authenticated is False
+    client.disable_campaign(_CAMPAIGN_ID)
+    assert client._authenticated is True
+    client._login_via_form.assert_called_once()
 
 
-@resp_lib.activate
-def test_enable_ad_group_sends_active_status():
-    _add_token_response()
-    resp_lib.add(
-        resp_lib.PATCH,
-        _ad_group_url(),
-        json={"id": _AD_GROUP_ID, "status": "ACTIVE"},
-        status=200,
+def test_custom_patch_body_overrides_default():
+    client = _make_client(
+        patch_body_pause='{"effective_status":"MANUALLY_PAUSED"}',
+        patch_body_resume='{"effective_status":"ACTIVE"}',
     )
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    result = client.enable_ad_group(_AD_GROUP_ID)
-    assert result["status"] == "ACTIVE"
+    client._authenticated = True
+    session = _stub_http_session(client)
 
-    # Verify the request body
-    assert len(resp_lib.calls) == 2  # token + patch
-    patch_call = resp_lib.calls[1]
-    import json
-    body = json.loads(patch_call.request.body)
-    assert body == {"status": "ACTIVE"}
+    client.disable_campaign(_CAMPAIGN_ID)
+
+    _, kwargs = session.patch.call_args
+    assert kwargs["data"] == b'{"effective_status":"MANUALLY_PAUSED"}'
 
 
-@resp_lib.activate
-def test_disable_ad_group_sends_paused_status():
-    _add_token_response()
-    resp_lib.add(
-        resp_lib.PATCH,
-        _ad_group_url(),
-        json={"id": _AD_GROUP_ID, "status": "PAUSED"},
-        status=200,
+def test_401_triggers_bearer_refresh_then_retry(monkeypatch):
+    """A 401 from ads-api should rebuild the http session and retry once."""
+    client = _make_client()
+    client._authenticated = True
+
+    first = MagicMock(status_code=401, text='{"error":"expired"}')
+    second = MagicMock(status_code=200, text='{"ok":true}')
+    session = MagicMock(name="http_session")
+    session.patch.side_effect = [first, second]
+    client._http_session = session
+
+    refresh = MagicMock(name="refresh")
+    monkeypatch.setattr(client, "_refresh_http_session", refresh)
+
+    client.disable_campaign(_CAMPAIGN_ID)
+
+    refresh.assert_called_once()
+    assert session.patch.call_count == 2
+
+
+def test_refresh_http_session_navigates_before_rebuild(monkeypatch):
+    """Token refresh must force-navigate to ads.reddit.com before re-extracting
+    cookies; otherwise ``driver.get_cookies()`` returns the same stale token
+    we just got 401'd with."""
+    driver = _fake_driver(current_url="https://ads.reddit.com/dashboard")
+    client = _make_client(driver=driver)
+
+    # Track call order: navigate must happen before _build_http_session reads
+    # cookies. We capture the call sequence and assert the ordering.
+    calls: list[str] = []
+    driver.get.side_effect = lambda url: calls.append(f"get({url})")
+    monkeypatch.setattr(
+        client,
+        "_build_http_session",
+        MagicMock(side_effect=lambda: calls.append("build") or MagicMock()),
     )
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    result = client.disable_ad_group(_AD_GROUP_ID)
-    assert result["status"] == "PAUSED"
+    monkeypatch.setattr("stream_ad_monitor.reddit_ad_client.time.sleep", lambda _: None)
 
-    import json
-    patch_call = resp_lib.calls[1]
-    body = json.loads(patch_call.request.body)
-    assert body == {"status": "PAUSED"}
+    client._refresh_http_session()
+
+    # Navigate happens before rebuild — re-extracting from the browser is
+    # pointless if the page hasn't been reloaded to mint a fresh token.
+    assert calls == ["get(https://ads.reddit.com/)", "build"]
 
 
-@resp_lib.activate
-def test_patch_ad_group_auto_authenticates():
-    _add_token_response()
-    resp_lib.add(
-        resp_lib.PATCH,
-        _ad_group_url(),
-        json={"id": _AD_GROUP_ID, "status": "ACTIVE"},
-        status=200,
+# ---------------------------------------------------------------------------
+# Campaign control – UI-click fallback
+# ---------------------------------------------------------------------------
+
+
+def test_non_2xx_falls_back_to_ui_click(monkeypatch):
+    client = _make_client()
+    client._authenticated = True
+    _stub_http_session(client, status=400, body="bad body shape")
+    click = MagicMock(name="click")
+    monkeypatch.setattr(client, "_click_toggle", click)
+
+    result = client.disable_campaign(_CAMPAIGN_ID)
+
+    click.assert_called_once_with(_CAMPAIGN_ID, event_type="manual_pause")
+    assert result == {"status": 400, "fallback": "ui_click"}
+
+
+def test_5xx_falls_back_to_ui_click(monkeypatch):
+    client = _make_client()
+    client._authenticated = True
+    _stub_http_session(client, status=500, body="server error")
+    monkeypatch.setattr(client, "_click_toggle", MagicMock(name="click"))
+
+    client.enable_campaign(_CAMPAIGN_ID)
+
+    client._click_toggle.assert_called_once_with(
+        _CAMPAIGN_ID, event_type="manual_activate"
     )
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    assert client._access_token is None
-    client.enable_ad_group(_AD_GROUP_ID)
-    assert client._access_token == _FAKE_TOKEN
 
 
-@resp_lib.activate
-def test_patch_ad_group_retries_on_401():
-    """A 401 from the ads API should trigger re-auth and one retry."""
-    _add_token_response()
-    # First PATCH returns 401
-    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=401)
-    # Re-auth token
-    _add_token_response()
-    # Retry PATCH succeeds
-    resp_lib.add(
-        resp_lib.PATCH,
-        _ad_group_url(),
-        json={"id": _AD_GROUP_ID, "status": "ACTIVE"},
-        status=200,
-    )
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    result = client.enable_ad_group(_AD_GROUP_ID)
-    assert result["status"] == "ACTIVE"
-    # auth + patch(401) + re-auth + patch(200)
-    assert len(resp_lib.calls) == 4
+def test_network_exception_falls_back_to_ui_click(monkeypatch):
+    """When requests.Session.patch raises (network error), fall back to UI click."""
+    import requests as _requests
+
+    client = _make_client()
+    client._authenticated = True
+    session = MagicMock(name="http_session")
+    session.patch.side_effect = _requests.RequestException("connection refused")
+    client._http_session = session
+    monkeypatch.setattr(client, "_click_toggle", MagicMock(name="click"))
+
+    client.disable_campaign(_CAMPAIGN_ID)
+
+    client._click_toggle.assert_called_once()
 
 
-@resp_lib.activate
-def test_patch_ad_group_retries_on_403():
-    """A 403 from the ads API should trigger re-auth and one retry."""
-    _add_token_response()
-    # First PATCH returns 403
-    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=403)
-    # Re-auth token
-    _add_token_response()
-    # Retry PATCH succeeds
-    resp_lib.add(
-        resp_lib.PATCH,
-        _ad_group_url(),
-        json={"id": _AD_GROUP_ID, "status": "PAUSED"},
-        status=200,
-    )
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    result = client.disable_ad_group(_AD_GROUP_ID)
-    assert result["status"] == "PAUSED"
-    assert len(resp_lib.calls) == 4
+# ---------------------------------------------------------------------------
+# Driver lifecycle
+# ---------------------------------------------------------------------------
 
 
-@resp_lib.activate
-def test_patch_ad_group_raises_on_http_error():
-    _add_token_response()
-    resp_lib.add(resp_lib.PATCH, _ad_group_url(), status=500)
-    client = RedditAdClient("cid", "csecret", _ACCOUNT_ID)
-    with pytest.raises(Exception):
-        client.enable_ad_group(_AD_GROUP_ID)
+def test_close_quits_driver_and_resets_auth():
+    driver = _fake_driver()
+    client = _make_client(driver=driver)
+    client._authenticated = True
+    client.close()
+    driver.quit.assert_called_once()
+    assert client._authenticated is False
+    assert client._driver is None
+
+
+def test_close_is_idempotent():
+    driver = _fake_driver()
+    client = _make_client(driver=driver)
+    client.close()
+    client.close()  # must not raise
+
+
+# ---------------------------------------------------------------------------
+# Session persistence
+# ---------------------------------------------------------------------------
+
+
+def test_save_session_writes_cookies_and_local_storage(tmp_path):
+    jar = tmp_path / "jar.json"
+    driver = _fake_driver()
+    driver.get_cookies.return_value = [{"name": "reddit_session", "value": "abc"}]
+    driver.execute_script.return_value = {"theme": "dark"}
+    client = _make_client(driver=driver, cookie_jar_path=str(jar))
+    client._save_session()
+
+    written = json.loads(jar.read_text())
+    assert written["cookies"][0]["name"] == "reddit_session"
+    assert written["local_storage"] == {"theme": "dark"}
+
+
+def test_save_session_no_op_without_jar_path():
+    driver = _fake_driver()
+    client = _make_client(driver=driver, cookie_jar_path="")
+    client._save_session()  # must not raise, must not call get_cookies
+    driver.get_cookies.assert_not_called()

@@ -27,7 +27,7 @@ from stream_ad_monitor.rules import Rule, load_rules_from_yaml
     ],
 )
 def test_rule_matches_title(title, keywords, expected):
-    rule = Rule(name="test", keywords=keywords, ad_group_ids=["adg_1"])
+    rule = Rule(name="test", keywords=keywords, campaign_ids=["adg_1"])
     assert rule.matches_title(title) == expected
 
 
@@ -44,7 +44,7 @@ def test_load_rules_parses_minimal_yaml(tmp_path):
               - name: "Spark"
                 keywords:
                   - Spark
-                ad_group_ids:
+                campaign_ids:
                   - adg_spark_123
         """)
     )
@@ -52,7 +52,7 @@ def test_load_rules_parses_minimal_yaml(tmp_path):
     assert len(rules) == 1
     assert rules[0].name == "Spark"
     assert rules[0].keywords == ["Spark"]
-    assert rules[0].ad_group_ids == ["adg_spark_123"]
+    assert rules[0].campaign_ids == ["adg_spark_123"]
 
 
 def test_load_rules_parses_multiple_rules(tmp_path):
@@ -63,13 +63,13 @@ def test_load_rules_parses_multiple_rules(tmp_path):
               - name: "Spark"
                 keywords:
                   - Spark
-                ad_group_ids:
+                campaign_ids:
                   - adg_spark
               - name: "Home Assistant"
                 keywords:
                   - home assistant
                   - homeassistant
-                ad_group_ids:
+                campaign_ids:
                   - adg_ha
                   - adg_rpi
         """)
@@ -80,8 +80,8 @@ def test_load_rules_parses_multiple_rules(tmp_path):
     assert rules[1].name == "Home Assistant"
     assert "home assistant" in rules[1].keywords
     assert "homeassistant" in rules[1].keywords
-    assert "adg_ha" in rules[1].ad_group_ids
-    assert "adg_rpi" in rules[1].ad_group_ids
+    assert "adg_ha" in rules[1].campaign_ids
+    assert "adg_rpi" in rules[1].campaign_ids
 
 
 def test_load_rules_raises_on_empty_rules_list(tmp_path):
@@ -105,7 +105,7 @@ def test_load_rules_raises_when_rule_has_no_keywords(tmp_path):
             rules:
               - name: "Bad"
                 keywords: []
-                ad_group_ids:
+                campaign_ids:
                   - adg_1
         """)
     )
@@ -121,10 +121,10 @@ def test_load_rules_raises_when_rule_has_no_ad_groups(tmp_path):
               - name: "Bad"
                 keywords:
                   - Spark
-                ad_group_ids: []
+                campaign_ids: []
         """)
     )
-    with pytest.raises(ValueError, match="no ad_group_ids"):
+    with pytest.raises(ValueError, match="no campaign_ids"):
         load_rules_from_yaml(str(rules_yaml))
 
 
@@ -135,7 +135,7 @@ def test_load_rules_uses_index_as_name_when_missing(tmp_path):
             rules:
               - keywords:
                   - Spark
-                ad_group_ids:
+                campaign_ids:
                   - adg_1
         """)
     )

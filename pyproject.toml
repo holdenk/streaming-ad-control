@@ -1,0 +1,25 @@
+[tool.poetry]
+name = "stream-ad-monitor"
+version = "0.2.0"
+description = "Monitors a Twitch stream and toggles a Reddit ad group via the Reddit Ads dashboard."
+authors = ["holden <holden@pigscanfly.ca>"]
+readme = "README.md"
+packages = [{ include = "stream_ad_monitor" }]
+
+[tool.poetry.dependencies]
+python = "^3.10"
+PyYAML = ">=6.0.1"
+requests = ">=2.31.0"
+selenium = ">=4.18.0"
+
+[tool.poetry.group.dev.dependencies]
+pytest = ">=8.0.0"
+pytest-mock = ">=3.12.0"
+responses = ">=0.25.0"
+
+[tool.poetry.scripts]
+stream-ad-monitor = "run:main"
+
+[build-system]
+requires = ["poetry-core>=1.7.0"]
+build-backend = "poetry.core.masonry.api"
