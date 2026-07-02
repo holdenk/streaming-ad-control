@@ -1,10 +1,10 @@
 [tool.poetry]
 name = "stream-ad-monitor"
-version = "0.2.0"
-description = "Monitors a Twitch stream and toggles a Reddit ad group via the Reddit Ads dashboard."
+version = "0.3.0"
+description = "Monitors a Twitch stream and toggles Reddit Ads and TrafficStars campaigns."
 authors = ["holden <holden@pigscanfly.ca>"]
 readme = "README.md"
-packages = [{ include = "stream_ad_monitor" }]
+packages = [{ include = "stream_ad_monitor" }, { include = "run.py" }]
 
 [tool.poetry.dependencies]
 python = "^3.10"

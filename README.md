@@ -1,11 +1,24 @@
 # streaming-ad-control
 
-Monitors a Twitch stream and toggles a Reddit ads campaign based on the stream
-title. No OAuth — a headless Chromium handles login and cookie management,
-then a `requests.Session` (pre-loaded with the dashboard's `token_v2` bearer
-extracted via Selenium) PATCHes `ads-api.reddit.com` directly.
+Monitors a Twitch stream and toggles ad campaigns based on the stream title.
+Two ad networks are supported, each rule in `rules.yaml` can target either or
+both:
 
-## Architecture
+- **Reddit Ads** — no official API access, so a headless Chromium handles
+  login and cookie management, then a `requests.Session` (pre-loaded with the
+  dashboard's `token_v2` bearer extracted via Selenium) PATCHes
+  `ads-api.reddit.com` directly.
+- **TrafficStars** — plain REST. The account API key (generate on
+  [admin.trafficstars.com/profile](https://admin.trafficstars.com/profile/))
+  acts as an OAuth2 refresh token against `POST /v1/auth/token`; campaigns
+  are toggled with `PUT /v2/campaigns/run` / `PUT /v2/campaigns/pause`.
+  No browser needed. ([API docs](https://docs.trafficstars.com/))
+
+Credentials are only required for networks your rules actually use — a
+TrafficStars-only setup never launches Chromium and doesn't need Reddit
+credentials.
+
+## Architecture (Reddit)
 
 Two things conspire to make this awkward:
 
@@ -52,10 +65,13 @@ sudo tee /etc/streaming-ad-monitor/env <<'EOF'
 TWITCH_CLIENT_ID=...
 TWITCH_CLIENT_SECRET=...
 TWITCH_CHANNEL_LOGIN=...
+# Required when any rule targets Reddit campaigns:
 REDDIT_USERNAME=...
 REDDIT_PASSWORD=...
-# Required: where to persist the Reddit session between runs
+# Where to persist the Reddit session between runs
 REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
+# Required when any rule targets TrafficStars campaigns:
+TRAFFICSTARS_API_KEY=...
 EOF
 sudo chmod 640 /etc/streaming-ad-monitor/env
 sudo chown root:streaming-ad-monitor /etc/streaming-ad-monitor/env
@@ -84,27 +100,35 @@ If the file path is owned by a user the daemon can't read, `chmod 644` it or
 move it. The contents are sensitive (full Reddit session) — keep that in mind
 when picking a path.
 
-## Finding your campaign ID
+## Finding your campaign IDs
 
-In the ads.reddit.com dashboard, navigate to a campaign. The URL bar will
-show something like `.../dashboard/campaigns/2470329120103230906` — the
-trailing number is the campaign ID. Put it in `rules.yaml` (or
-`REDDIT_CAMPAIGN_ID` for single-rule mode).
+**Reddit:** in the ads.reddit.com dashboard, navigate to a campaign. The URL
+bar will show something like `.../dashboard/campaigns/2470329120103230906` —
+the trailing number is the campaign ID. Put it in `rules.yaml` under
+`campaign_ids` (or `REDDIT_CAMPAIGN_ID` for single-rule mode).
+
+**TrafficStars:** the numeric campaign ID is shown in the campaign list at
+admin.trafficstars.com. Put it in `rules.yaml` under
+`trafficstars_campaign_ids` (or `TRAFFICSTARS_CAMPAIGN_ID` for single-rule
+mode).
 
 ## Verify
 
-After bootstrap, verify the toggle works end-to-end before enabling the
+After bootstrap, verify the toggles work end-to-end before enabling the
 daemon:
 
 ```sh
-# Round-trip enable→disable, asserts configured_status changes correctly
+# Reddit: round-trip enable→disable, asserts configured_status changes
 ./venv/bin/python scripts/test_enable_disable.py <campaign_id>
 
-# Or the longer disable→enable→disable flow
+# Reddit: or the longer disable→enable→disable flow
 ./venv/bin/python scripts/smoke_test_reddit.py <campaign_id> --log-level DEBUG
+
+# TrafficStars: round-trip run→pause via the REST API
+./venv/bin/python scripts/test_enable_disable_trafficstars.py <campaign_id>
 ```
 
-Both leave the campaign PAUSED on success.
+All leave the campaign PAUSED on success.
 
 ## Enable the service
 
@@ -131,3 +155,7 @@ sudo systemctl enable --now streaming-ad-monitor
 - **Resource cost.** Headless Chromium is ~200 MB resident. Fine for this
   workload (one PATCH per state edge, on the order of a few per day);
   excessive if you ever scale to dozens of accounts.
+- **TrafficStars token rotation (~10h):** handled automatically. The bearer
+  is renewed from the API key shortly before its `expires_in` deadline, and
+  a mid-flight 401 triggers one re-auth + retry. The API key itself does not
+  expire unless you regenerate it on the profile page.

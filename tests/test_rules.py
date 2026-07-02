@@ -146,3 +146,99 @@ def test_load_rules_uses_index_as_name_when_missing(tmp_path):
 def test_load_rules_raises_on_file_not_found():
     with pytest.raises(FileNotFoundError):
         load_rules_from_yaml("/nonexistent/path/rules.yaml")
+
+
+# ---------------------------------------------------------------------------
+# TrafficStars campaign support
+# ---------------------------------------------------------------------------
+
+
+def test_load_rules_parses_trafficstars_campaigns(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent("""
+            rules:
+              - name: "Both networks"
+                keywords:
+                  - Spark
+                campaign_ids:
+                  - reddit_camp_1
+                trafficstars_campaign_ids:
+                  - 123456
+                  - "654321"
+        """)
+    )
+    rules = load_rules_from_yaml(str(rules_yaml))
+    assert rules[0].campaign_ids == ["reddit_camp_1"]
+    assert rules[0].trafficstars_campaign_ids == ["123456", "654321"]
+
+
+def test_load_rules_accepts_trafficstars_only_rule(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent("""
+            rules:
+              - name: "TS only"
+                keywords:
+                  - Spark
+                trafficstars_campaign_ids:
+                  - 123456
+        """)
+    )
+    rules = load_rules_from_yaml(str(rules_yaml))
+    assert rules[0].campaign_ids == []
+    assert rules[0].trafficstars_campaign_ids == ["123456"]
+
+
+def test_load_rules_accepts_reddit_campaign_ids_alias(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent("""
+            rules:
+              - name: "Aliased"
+                keywords:
+                  - Spark
+                reddit_campaign_ids:
+                  - reddit_camp_1
+        """)
+    )
+    rules = load_rules_from_yaml(str(rules_yaml))
+    assert rules[0].campaign_ids == ["reddit_camp_1"]
+
+
+def test_load_rules_coerces_numeric_ids_to_strings(tmp_path):
+    """Unquoted numeric YAML IDs parse as ints; the loader must normalise."""
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent("""
+            rules:
+              - name: "Numeric"
+                keywords:
+                  - Spark
+                campaign_ids:
+                  - 2470329120103230906
+        """)
+    )
+    rules = load_rules_from_yaml(str(rules_yaml))
+    assert rules[0].campaign_ids == ["2470329120103230906"]
+
+
+def test_load_rules_raises_on_non_numeric_trafficstars_id(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent("""
+            rules:
+              - name: "Bad TS"
+                keywords:
+                  - Spark
+                trafficstars_campaign_ids:
+                  - not_a_number
+        """)
+    )
+    with pytest.raises(ValueError, match="not numeric"):
+        load_rules_from_yaml(str(rules_yaml))
+
+
+def test_rule_reddit_campaign_ids_property_aliases_campaign_ids():
+    rule = Rule(name="r", keywords=["k"], campaign_ids=["c1"])
+    assert rule.reddit_campaign_ids == ["c1"]
