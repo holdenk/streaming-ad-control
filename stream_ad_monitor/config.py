@@ -56,9 +56,9 @@ class Config:
     Per-network credentials are only required when at least one rule
     targets that network:
 
-    * Reddit: ``REDDIT_USERNAME`` + ``REDDIT_PASSWORD`` +
-      ``REDDIT_ADS_ACCOUNT_ID`` (the id in the dashboard URL:
-      ads.reddit.com/account/<id>/dashboard)
+    * Reddit: ``REDDIT_USERNAME`` + ``REDDIT_PASSWORD``. The ads account id
+      is auto-discovered after login; ``REDDIT_ADS_ACCOUNT_ID`` is an
+      optional override.
     * TrafficStars: ``TRAFFICSTARS_API_KEY`` (generate on
       https://admin.trafficstars.com/profile/)
     """
@@ -88,12 +88,13 @@ class Config:
         # Only required when at least one rule targets a Reddit campaign.
         self.reddit_username: str = _require("REDDIT_USERNAME") if needs_reddit else ""
         self.reddit_password: str = _require("REDDIT_PASSWORD") if needs_reddit else ""
-        # The ads account id from the dashboard URL
-        # (ads.reddit.com/account/<id>/dashboard). Required because the bare
-        # ads.reddit.com host redirects to the business.reddit.com marketing
-        # page, making login verification and token refresh impossible.
-        self.reddit_ads_account_id: str = (
-            _require("REDDIT_ADS_ACCOUNT_ID") if needs_reddit else ""
+        # Optional. The ads account id from the dashboard URL
+        # (ads.reddit.com/account/<id>/dashboard). When unset, the client
+        # auto-discovers it after login (a logged-in hit on ads.reddit.com
+        # redirects to the account-scoped dashboard). Set it to skip discovery
+        # or to pin a specific account when the login has more than one.
+        self.reddit_ads_account_id: str = _sanitize(
+            os.environ.get("REDDIT_ADS_ACCOUNT_ID", "")
         )
         # Optional: where to persist cookies + localStorage between runs so
         # we don't re-login every poll. Empty string disables persistence.

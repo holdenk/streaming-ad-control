@@ -16,13 +16,14 @@ Required env vars:
 
 Required when any rule targets Reddit campaigns:
   REDDIT_USERNAME, REDDIT_PASSWORD
-  REDDIT_ADS_ACCOUNT_ID  — the id in the dashboard URL:
-                           ads.reddit.com/account/<id>/dashboard
 
 Required when any rule targets TrafficStars campaigns:
   TRAFFICSTARS_API_KEY
 
 Optional env vars:
+  REDDIT_ADS_ACCOUNT_ID       Ads account id (from the dashboard URL:
+                              ads.reddit.com/account/<id>/dashboard).
+                              Auto-discovered after login when unset.
   REDDIT_COOKIE_JAR           Persist session to this file path between runs
   REDDIT_PATCH_BODY_PAUSE     Override the JSON body for pause (default
                               '{"data":{"configured_status":"PAUSED"}}')

@@ -68,10 +68,11 @@ TWITCH_CHANNEL_LOGIN=...
 # Required when any rule targets Reddit campaigns:
 REDDIT_USERNAME=...
 REDDIT_PASSWORD=...
-# The id in the dashboard URL: ads.reddit.com/account/<id>/dashboard
-REDDIT_ADS_ACCOUNT_ID=...
 # Where to persist the Reddit session between runs
 REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
+# Optional: ads account id (ads.reddit.com/account/<id>/dashboard).
+# Auto-discovered after login when unset.
+# REDDIT_ADS_ACCOUNT_ID=...
 # Required when any rule targets TrafficStars campaigns:
 TRAFFICSTARS_API_KEY=...
 EOF
@@ -80,11 +81,10 @@ sudo chown root:streaming-ad-monitor /etc/streaming-ad-monitor/env
 sudo install -d -o streaming-ad-monitor -m 700 /var/lib/streaming-ad-monitor
 ```
 
-## One-time bootstrap (CAPTCHA clear)
+## One-time bootstrap
 
-A fresh Chromium profile usually trips Reddit's CAPTCHA on first login. The
-service account can't solve it, so do it once interactively from a desktop
-session that owns an X display:
+Do this once interactively from a desktop session that owns an X display, so
+a real browser can establish the session:
 
 ```sh
 cd /opt/streaming-ad-monitor
@@ -92,32 +92,40 @@ set -a; source /etc/streaming-ad-monitor/env; set +a
 ./venv/bin/python scripts/bootstrap_reddit_session.py
 ```
 
-A Chromium window opens; the script warms up via the reddit.com homepage
-(cold-hitting `/login` trips Reddit's "blocked by network security" page),
-then auto-fills your credentials. If a CAPTCHA or a network-security block
-appears, clear it in the window (for a block: go to reddit.com, click
-*Log In*, and finish the login yourself) and press ENTER in the terminal —
-the script picks up the session either way. On success it writes the session
-(cookies + localStorage) to `$REDDIT_COOKIE_JAR`. From then on, the daemon
-restores the session headlessly with no human in the loop.
+First it checks `$REDDIT_COOKIE_JAR`: if it already restores a live session,
+it prints "already bootstrapped" and exits — safe to re-run anytime.
+
+Otherwise a Chromium window opens and the script logs in automatically with
+your configured credentials. It warms up via the reddit.com homepage, waits
+for it to settle, then opens the login form and fills in your username and
+password — cold-hitting `/login` directly trips Reddit's "blocked by network
+security" page, and the homepage warm-up avoids it. If a transient block
+still occurs it backs off and retries the automated flow (no manual login).
+The one thing that needs you is a CAPTCHA: solve it in the window and press
+ENTER. On success it writes the session (cookies + localStorage) to
+`$REDDIT_COOKIE_JAR` and logs the discovered ads account id. From then on,
+the daemon restores the session headlessly with no human in the loop.
+
+If the automated login is blocked on every attempt, the egress IP is likely
+flagged (VPN/datacenter reputation) — run the bootstrap from a residential
+connection.
 
 If the file path is owned by a user the daemon can't read, `chmod 644` it or
 move it. The contents are sensitive (full Reddit session) — keep that in mind
 when picking a path.
 
-## Finding your Reddit ads account ID and campaign IDs
+## Finding your Reddit campaign IDs
 
-**Account ID (required):** log in at business.reddit.com → open the ads
-manager. The URL becomes `ads.reddit.com/account/<account_id>/dashboard` —
-that `<account_id>` is `REDDIT_ADS_ACCOUNT_ID`. It's required because the
-bare `ads.reddit.com` host redirects to the business.reddit.com marketing
-page (even when logged in), which breaks login verification and token
-refresh.
-
-**Reddit campaign IDs:** navigate to a campaign in the dashboard. The URL
-will show `.../dashboard/campaigns/2470329120103230906` — the trailing
-number is the campaign ID. Put it in `rules.yaml` under `campaign_ids` (or
+Navigate to a campaign in the ads dashboard. The URL will show
+`.../dashboard/campaigns/2470329120103230906` — the trailing number is the
+campaign ID. Put it in `rules.yaml` under `campaign_ids` (or
 `REDDIT_CAMPAIGN_ID` for single-rule mode).
+
+The bare `ads.reddit.com` host redirects to the account-scoped dashboard
+(`ads.reddit.com/account/<id>/dashboard`) once you're logged in — the client
+reads that `<id>` from the redirect automatically, so you don't normally need
+to set `REDDIT_ADS_ACCOUNT_ID`. Set it only to pin a specific account when
+your login has more than one.
 
 **TrafficStars:** the numeric campaign ID is shown in the campaign list at
 admin.trafficstars.com. Put it in `rules.yaml` under
