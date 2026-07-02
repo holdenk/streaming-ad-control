@@ -38,11 +38,21 @@ def main() -> int:
         return 2
     campaign_id = sys.argv[1]
 
+    # Credentials are optional here: with a valid REDDIT_COOKIE_JAR the client
+    # restores the saved session and never needs to log in. They're only a
+    # fallback for when the jar is missing or expired.
+    cookie_jar = os.environ.get("REDDIT_COOKIE_JAR", "")
+    if not cookie_jar:
+        print(
+            "warning: REDDIT_COOKIE_JAR is not set — without it the client "
+            "can't reuse the bootstrapped session and will try a fresh login.",
+            file=sys.stderr,
+        )
     client = RedditAdClient(
-        username=os.environ["REDDIT_USERNAME"],
-        password=os.environ["REDDIT_PASSWORD"],
+        username=os.environ.get("REDDIT_USERNAME", ""),
+        password=os.environ.get("REDDIT_PASSWORD", ""),
         ads_account_id=os.environ.get("REDDIT_ADS_ACCOUNT_ID", ""),
-        cookie_jar_path=os.environ.get("REDDIT_COOKIE_JAR", ""),
+        cookie_jar_path=cookie_jar,
     )
 
     failures: list[str] = []

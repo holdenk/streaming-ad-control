@@ -65,13 +65,16 @@ def main() -> int:
     )
 
     try:
-        # If the jar already restores a live session, there's nothing to do.
+        # If the jar already restores a live session, there's nothing to log in
+        # for. Re-save so a freshly-discovered account id (older jars saved it
+        # as "unknown") and refreshed cookies get persisted.
         if client._restore_session():
+            client._save_session()
             account = client.ads_account_id or "unknown"
             print(
                 f"Cookie jar at {cookie_jar_path} already has a live Reddit "
                 f"session (ads account: {account}). Already bootstrapped — "
-                "nothing to do."
+                "refreshed and saved."
             )
             return 0
 

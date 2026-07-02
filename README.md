@@ -135,7 +135,9 @@ mode).
 ## Verify
 
 After bootstrap, verify the toggles work end-to-end before enabling the
-daemon:
+daemon. The Reddit checks reuse the bootstrapped session, so only
+`REDDIT_COOKIE_JAR` needs to be set — no username/password required (the ads
+account id is loaded from the jar or discovered on the fly):
 
 ```sh
 # Reddit: round-trip enable→disable, asserts configured_status changes

@@ -82,6 +82,12 @@ _USER_AGENT = (
 
 _LOGIN_TIMEOUT_SEC = 30
 _PAGE_TIMEOUT_SEC = 30
+# After landing on ads.reddit.com, a logged-in session bounces through a
+# client-side redirect to the account-scoped dashboard. Poll current_url until
+# it's decisive (account dashboard / business marketing / login) so we don't
+# read it mid-redirect and miss the /account/<id>/ path.
+_ADS_SETTLE_TIMEOUT_SEC = 10
+_ADS_SETTLE_POLL_SEC = 0.5
 # Dwell on the reddit.com homepage before going to the login form. A cold hit
 # straight to /login trips Reddit's "blocked by network security" page; a real
 # user lands on the homepage first, which sets the edge cookies / clears the JS
@@ -142,8 +148,11 @@ class RedditAdClient:
         headless: bool = True,
         driver: Optional[WebDriver] = None,
     ) -> None:
-        if not username or not password:
-            raise ValueError("RedditAdClient requires both username and password.")
+        if not cookie_jar_path and (not username or not password):
+            raise ValueError(
+                "RedditAdClient needs a username and password to log in, or a "
+                "cookie_jar_path to restore a saved session."
+            )
         self.username = username
         self.password = password
         # Optional. When empty, it's auto-discovered after login: a logged-in
@@ -269,6 +278,14 @@ class RedditAdClient:
             self._authenticated = True
             return
 
+        if not (self.username and self.password):
+            raise RuntimeError(
+                "Reddit cookie jar did not restore a live session and no "
+                "REDDIT_USERNAME/REDDIT_PASSWORD are set to log in with. "
+                "Re-run scripts/bootstrap_reddit_session.py to refresh the "
+                f"session at {self.cookie_jar_path or '<no cookie jar configured>'}."
+            )
+
         self._login_via_form()
         self._save_session()
         self._authenticated = True
@@ -288,6 +305,13 @@ class RedditAdClient:
         if not cookies:
             return False
 
+        # Load the persisted account id first so navigation is account-scoped
+        # and doesn't have to rely on the bare-host redirect.
+        jar_account = jar.get("ads_account_id")
+        if jar_account and not self.ads_account_id:
+            self.ads_account_id = jar_account
+            logger.info("Loaded ads account id from cookie jar: %s", jar_account)
+
         # Selenium requires you to be on a domain before adding its cookies.
         self.driver.get(self._ads_home_url)
         for cookie in cookies:
@@ -304,10 +328,32 @@ class RedditAdClient:
             )
 
         self.driver.get(self._ads_home_url)
+        self._settle_ads_dashboard()
         return self._is_logged_in()
 
+    def _settle_ads_dashboard(self) -> None:
+        """Wait for ads.reddit.com's post-load redirect to reach a decisive URL.
+
+        A logged-in hit on ads.reddit.com bounces through a client-side
+        redirect to ``/account/<id>/dashboard``; reading ``current_url`` too
+        early misses that path (which is where the account id lives) and can
+        momentarily look logged-out. Poll until the URL is decisive — account
+        dashboard, business.reddit.com marketing (logged out), or /login — then
+        let the caller inspect it. Best-effort: returns after the timeout even
+        if nothing decisive appears.
+        """
+        deadline = time.monotonic() + _ADS_SETTLE_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            try:
+                low = (self.driver.current_url or "").lower()
+            except WebDriverException:
+                return
+            if "/account/" in low or "business.reddit.com" in low or "login" in low:
+                return
+            time.sleep(_ADS_SETTLE_POLL_SEC)
+
     def _save_session(self) -> None:
-        """Persist cookies + localStorage to disk (if cookie_jar_path is set)."""
+        """Persist cookies + localStorage + account id to disk (if path set)."""
         if not self.cookie_jar_path:
             return
         cookies = self.driver.get_cookies()
@@ -320,7 +366,14 @@ class RedditAdClient:
         )
         try:
             with open(self.cookie_jar_path, "w", encoding="utf-8") as fh:
-                json.dump({"cookies": cookies, "local_storage": local_storage}, fh)
+                json.dump(
+                    {
+                        "cookies": cookies,
+                        "local_storage": local_storage,
+                        "ads_account_id": self.ads_account_id,
+                    },
+                    fh,
+                )
         except OSError as exc:
             logger.warning("Could not persist cookie jar to %s: %s", self.cookie_jar_path, exc)
 
@@ -405,6 +458,7 @@ class RedditAdClient:
         # captures that id. A logged-out session lands on business.reddit.com
         # instead, which _is_logged_in rejects.
         self.driver.get(_ADS_HOME)
+        self._settle_ads_dashboard()
         if not self._is_logged_in():
             self._raise_with_diagnostics(
                 "logged into reddit.com but the ads dashboard isn't accessible "

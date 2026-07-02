@@ -45,15 +45,22 @@ def main() -> int:
 
     username = os.environ.get("REDDIT_USERNAME", "").strip()
     password = os.environ.get("REDDIT_PASSWORD", "").strip()
-    if not username or not password:
-        print("error: REDDIT_USERNAME and REDDIT_PASSWORD must be set.", file=sys.stderr)
+    cookie_jar = os.environ.get("REDDIT_COOKIE_JAR", "").strip()
+    # With a valid cookie jar the client restores the saved session, so
+    # credentials are only needed as a fallback when the jar is absent.
+    if not cookie_jar and not (username and password):
+        print(
+            "error: set REDDIT_COOKIE_JAR (bootstrapped session) or "
+            "REDDIT_USERNAME + REDDIT_PASSWORD.",
+            file=sys.stderr,
+        )
         return 2
 
     client = RedditAdClient(
         username=username,
         password=password,
         ads_account_id=os.environ.get("REDDIT_ADS_ACCOUNT_ID", "").strip(),
-        cookie_jar_path=os.environ.get("REDDIT_COOKIE_JAR", "").strip(),
+        cookie_jar_path=cookie_jar,
         patch_body_pause=os.environ.get(
             "REDDIT_PATCH_BODY_PAUSE", '{"data":{"configured_status":"PAUSED"}}'
         ),
