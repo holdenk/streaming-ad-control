@@ -16,6 +16,8 @@ Required env vars:
 
 Required when any rule targets Reddit campaigns:
   REDDIT_USERNAME, REDDIT_PASSWORD
+  REDDIT_ADS_ACCOUNT_ID  — the id in the dashboard URL:
+                           ads.reddit.com/account/<id>/dashboard
 
 Required when any rule targets TrafficStars campaigns:
   TRAFFICSTARS_API_KEY

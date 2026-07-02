@@ -9,7 +9,10 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from stream_ad_monitor.reddit_ad_client import RedditAdClient
+from stream_ad_monitor.reddit_ad_client import (
+    RedditAdClient,
+    RedditBlockedError,
+)
 
 
 _CAMPAIGN_ID = "2470329120103230906"
@@ -24,6 +27,8 @@ def _fake_driver(
     """Build a mock WebDriver whose execute_async_script returns a fetch result."""
     driver = MagicMock()
     driver.current_url = current_url
+    driver.title = "reddit"
+    driver.page_source = "<html></html>"
     driver.execute_async_script.return_value = {
         "status": fetch_status,
         "body": fetch_body,
@@ -329,3 +334,104 @@ def test_save_session_no_op_without_jar_path():
     client = _make_client(driver=driver, cookie_jar_path="")
     client._save_session()  # must not raise, must not call get_cookies
     driver.get_cookies.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Account-scoped dashboard URLs
+# ---------------------------------------------------------------------------
+
+
+def test_ads_home_is_account_scoped_when_account_id_set():
+    client = _make_client(ads_account_id="acct123")
+    assert client._ads_home_url == "https://ads.reddit.com/account/acct123/dashboard"
+
+
+def test_ads_home_falls_back_to_bare_host_without_account_id():
+    client = _make_client()
+    assert client._ads_home_url == "https://ads.reddit.com/"
+
+
+def test_campaign_deep_link_is_account_scoped():
+    client = _make_client(ads_account_id="acct123")
+    assert client._campaign_url("777") == (
+        "https://ads.reddit.com/account/acct123/dashboard/campaigns/777"
+    )
+
+
+def test_refresh_http_session_navigates_to_account_dashboard(monkeypatch):
+    driver = _fake_driver(current_url="https://ads.reddit.com/account/acct123/dashboard")
+    client = _make_client(driver=driver, ads_account_id="acct123")
+    monkeypatch.setattr(client, "_build_http_session", MagicMock(return_value=MagicMock()))
+    monkeypatch.setattr("stream_ad_monitor.reddit_ad_client.time.sleep", lambda _: None)
+
+    client._refresh_http_session()
+
+    driver.get.assert_called_once_with("https://ads.reddit.com/account/acct123/dashboard")
+
+
+# ---------------------------------------------------------------------------
+# Login flow: homepage warm-up + network-security block detection
+# ---------------------------------------------------------------------------
+
+
+def test_login_warms_up_via_homepage_before_login_page(monkeypatch):
+    """Cold-hitting /login trips Reddit's block page; the homepage must load first."""
+    driver = _fake_driver(current_url="https://ads.reddit.com/account/acct123/dashboard")
+    driver.get_cookie.return_value = {"name": "reddit_session", "value": "x"}
+    client = _make_client(driver=driver, ads_account_id="acct123")
+
+    username_field, password_field = MagicMock(), MagicMock()
+
+    def find(selector):
+        if "username" in selector:
+            return username_field
+        if "password" in selector:
+            return password_field
+        return None  # no login link found → direct /login navigation
+
+    monkeypatch.setattr(client, "_find_in_shadow_dom", find)
+
+    client._login_via_form()
+
+    gets = [c.args[0] for c in driver.get.call_args_list]
+    assert gets == [
+        "https://www.reddit.com/",
+        "https://www.reddit.com/login/",
+        "https://ads.reddit.com/account/acct123/dashboard",
+    ]
+    username_field.send_keys.assert_called_once_with("u")
+
+
+def test_login_clicks_homepage_login_link_when_present(monkeypatch):
+    driver = _fake_driver(current_url="https://ads.reddit.com/account/acct123/dashboard")
+    driver.get_cookie.return_value = {"name": "reddit_session", "value": "x"}
+    client = _make_client(driver=driver, ads_account_id="acct123")
+
+    login_link = MagicMock(name="login_link")
+    username_field, password_field = MagicMock(), MagicMock()
+
+    def find(selector):
+        if "login" in selector:
+            return login_link
+        if "username" in selector:
+            return username_field
+        if "password" in selector:
+            return password_field
+        return None
+
+    monkeypatch.setattr(client, "_find_in_shadow_dom", find)
+
+    client._login_via_form()
+
+    login_link.click.assert_called_once()
+    gets = [c.args[0] for c in driver.get.call_args_list]
+    assert "https://www.reddit.com/login/" not in gets  # link click, not direct hit
+
+
+def test_login_raises_blocked_error_on_network_security_page():
+    driver = _fake_driver()
+    driver.page_source = "<html>You've been blocked by network security.</html>"
+    client = _make_client(driver=driver)
+
+    with pytest.raises(RedditBlockedError, match="network security"):
+        client._login_via_form()

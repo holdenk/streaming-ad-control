@@ -68,6 +68,8 @@ TWITCH_CHANNEL_LOGIN=...
 # Required when any rule targets Reddit campaigns:
 REDDIT_USERNAME=...
 REDDIT_PASSWORD=...
+# The id in the dashboard URL: ads.reddit.com/account/<id>/dashboard
+REDDIT_ADS_ACCOUNT_ID=...
 # Where to persist the Reddit session between runs
 REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
 # Required when any rule targets TrafficStars campaigns:
@@ -90,9 +92,12 @@ set -a; source /etc/streaming-ad-monitor/env; set +a
 ./venv/bin/python scripts/bootstrap_reddit_session.py
 ```
 
-A Chromium window opens; the script auto-fills your credentials. If a CAPTCHA
-appears, solve it in the window and press ENTER in the terminal — the script
-re-fills credentials and submits. On success it writes the session
+A Chromium window opens; the script warms up via the reddit.com homepage
+(cold-hitting `/login` trips Reddit's "blocked by network security" page),
+then auto-fills your credentials. If a CAPTCHA or a network-security block
+appears, clear it in the window (for a block: go to reddit.com, click
+*Log In*, and finish the login yourself) and press ENTER in the terminal —
+the script picks up the session either way. On success it writes the session
 (cookies + localStorage) to `$REDDIT_COOKIE_JAR`. From then on, the daemon
 restores the session headlessly with no human in the loop.
 
@@ -100,12 +105,19 @@ If the file path is owned by a user the daemon can't read, `chmod 644` it or
 move it. The contents are sensitive (full Reddit session) — keep that in mind
 when picking a path.
 
-## Finding your campaign IDs
+## Finding your Reddit ads account ID and campaign IDs
 
-**Reddit:** in the ads.reddit.com dashboard, navigate to a campaign. The URL
-bar will show something like `.../dashboard/campaigns/2470329120103230906` —
-the trailing number is the campaign ID. Put it in `rules.yaml` under
-`campaign_ids` (or `REDDIT_CAMPAIGN_ID` for single-rule mode).
+**Account ID (required):** log in at business.reddit.com → open the ads
+manager. The URL becomes `ads.reddit.com/account/<account_id>/dashboard` —
+that `<account_id>` is `REDDIT_ADS_ACCOUNT_ID`. It's required because the
+bare `ads.reddit.com` host redirects to the business.reddit.com marketing
+page (even when logged in), which breaks login verification and token
+refresh.
+
+**Reddit campaign IDs:** navigate to a campaign in the dashboard. The URL
+will show `.../dashboard/campaigns/2470329120103230906` — the trailing
+number is the campaign ID. Put it in `rules.yaml` under `campaign_ids` (or
+`REDDIT_CAMPAIGN_ID` for single-rule mode).
 
 **TrafficStars:** the numeric campaign ID is shown in the campaign list at
 admin.trafficstars.com. Put it in `rules.yaml` under

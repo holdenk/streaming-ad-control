@@ -64,6 +64,7 @@ class StreamAdMonitor:
             self.reddit = RedditAdClient(
                 username=config.reddit_username,
                 password=config.reddit_password,
+                ads_account_id=config.reddit_ads_account_id,
                 cookie_jar_path=config.reddit_cookie_jar_path,
                 patch_body_pause=config.reddit_patch_body_pause,
                 patch_body_resume=config.reddit_patch_body_resume,

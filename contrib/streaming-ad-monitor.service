@@ -39,6 +39,7 @@ Group=streaming-ad-monitor
 # Required when any rule targets Reddit campaigns:
 #   REDDIT_USERNAME=...
 #   REDDIT_PASSWORD=...
+#   REDDIT_ADS_ACCOUNT_ID=...   # from ads.reddit.com/account/<id>/dashboard
 #   REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
 #
 # Required when any rule targets TrafficStars campaigns:

@@ -52,6 +52,7 @@ def main() -> int:
     client = RedditAdClient(
         username=username,
         password=password,
+        ads_account_id=os.environ.get("REDDIT_ADS_ACCOUNT_ID", "").strip(),
         cookie_jar_path=os.environ.get("REDDIT_COOKIE_JAR", "").strip(),
         patch_body_pause=os.environ.get(
             "REDDIT_PATCH_BODY_PAUSE", '{"data":{"configured_status":"PAUSED"}}'

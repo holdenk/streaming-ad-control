@@ -20,6 +20,7 @@ BASE_ENV = {
     "TWITCH_CHANNEL_LOGIN": "some_channel",
     "REDDIT_USERNAME": "ads_user",
     "REDDIT_PASSWORD": "ads_password",
+    "REDDIT_ADS_ACCOUNT_ID": "acct123",
 }
 
 # Legacy single-rule env vars
@@ -89,6 +90,7 @@ def test_legacy_config_loads_all_required_env_vars():
     assert cfg.twitch_channel_login == "some_channel"
     assert cfg.reddit_username == "ads_user"
     assert cfg.reddit_password == "ads_password"
+    assert cfg.reddit_ads_account_id == "acct123"
 
 
 def test_legacy_config_creates_single_rule():
@@ -137,6 +139,7 @@ def test_config_custom_poll_interval():
         ("TWITCH_CHANNEL_LOGIN", "TWITCH_CHANNEL_LOGIN"),
         ("REDDIT_USERNAME", "REDDIT_USERNAME"),
         ("REDDIT_PASSWORD", "REDDIT_PASSWORD"),
+        ("REDDIT_ADS_ACCOUNT_ID", "REDDIT_ADS_ACCOUNT_ID"),
         ("REDDIT_CAMPAIGN_ID", "REDDIT_CAMPAIGN_ID"),
     ],
 )
@@ -282,6 +285,7 @@ def test_trafficstars_only_rules_do_not_require_reddit_creds(tmp_path):
     assert cfg.trafficstars_api_key == "ts_key"
     assert cfg.reddit_username == ""
     assert cfg.reddit_password == ""
+    assert cfg.reddit_ads_account_id == ""
 
 
 def test_trafficstars_rules_require_api_key(tmp_path):

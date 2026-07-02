@@ -41,6 +41,7 @@ def main() -> int:
     client = RedditAdClient(
         username=os.environ["REDDIT_USERNAME"],
         password=os.environ["REDDIT_PASSWORD"],
+        ads_account_id=os.environ.get("REDDIT_ADS_ACCOUNT_ID", ""),
         cookie_jar_path=os.environ.get("REDDIT_COOKIE_JAR", ""),
     )
 

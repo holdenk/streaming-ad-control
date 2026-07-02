@@ -19,6 +19,7 @@ REQUIRED_ENV = {
     "TWITCH_CHANNEL_LOGIN": "streamer",
     "REDDIT_USERNAME": "ads_user",
     "REDDIT_PASSWORD": "ads_password",
+    "REDDIT_ADS_ACCOUNT_ID": "acct123",
     "REDDIT_CAMPAIGN_ID": "camp_456",
 }
 
