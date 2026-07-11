@@ -141,11 +141,11 @@ def _patch_gate(monitor):
     return ctx, config_cls
 
 
-def test_main_stopped_pauses_everything_without_twitch():
+def test_main_stopped_pauses_everything_without_twitch(tmp_path):
     monitor = MagicMock()
     ctx, config_cls = _patch_gate(monitor)
     with ctx:
-        rc = gate.main(["stopped"])
+        rc = gate.main(["stopped", "--pidfile", str(tmp_path / "g.pid")])
 
     assert rc == 0
     monitor.apply.assert_called_once_with(title="", live=False)
@@ -165,16 +165,28 @@ def test_main_started_with_explicit_title_skips_twitch():
     config_cls.assert_called_once_with(require_twitch=False)
 
 
-def test_main_started_reads_title_from_twitch():
+def test_main_started_public_source_needs_no_creds():
     monitor = MagicMock()
     monitor.twitch.get_stream.return_value = {"title": "Live Spark coding"}
     ctx, config_cls = _patch_gate(monitor)
     with ctx:
-        rc = gate.main(["started"])
+        rc = gate.main(["started"])  # default source == public
 
     assert rc == 0
     monitor.apply.assert_called_once_with(title="Live Spark coding", live=True)
-    config_cls.assert_called_once_with(require_twitch=True)
+    config_cls.assert_called_once_with(require_twitch=False)  # public == no creds
+
+
+def test_main_started_helix_source_requires_creds():
+    monitor = MagicMock()
+    monitor.twitch.get_stream.return_value = {"title": "Live Spark coding"}
+    ctx, config_cls = _patch_gate(monitor)
+    with ctx:
+        rc = gate.main(["started", "--title-source", "helix"])
+
+    assert rc == 0
+    monitor.apply.assert_called_once_with(title="Live Spark coding", live=True)
+    config_cls.assert_called_once_with(require_twitch=True)  # helix needs creds
 
 
 def test_main_started_defaults_deny_when_twitch_never_live():
@@ -189,18 +201,147 @@ def test_main_started_defaults_deny_when_twitch_never_live():
     monitor.apply.assert_called_once_with(title="", live=False)
 
 
+def test_main_watch_with_explicit_title_is_rejected():
+    # Nothing should be constructed; the conflict is caught before Config.
+    rc = gate.main(["started", "--watch", "--title", "whatever"])
+    assert rc == 2
+
+
 def test_main_returns_2_on_bad_env_file(tmp_path):
     missing = tmp_path / "nope.env"
     rc = gate.main(["stopped", "--env-file", str(missing)])
     assert rc == 2
 
 
-def test_main_returns_1_when_apply_raises():
+def test_main_returns_1_when_apply_raises(tmp_path):
     monitor = MagicMock()
     monitor.apply.side_effect = RuntimeError("toggle failed")
     ctx, _config_cls = _patch_gate(monitor)
     with ctx:
-        rc = gate.main(["stopped"])
+        rc = gate.main(["stopped", "--pidfile", str(tmp_path / "g.pid")])
 
     assert rc == 1
     monitor.close.assert_called_once_with()  # still cleaned up
+
+
+def test_main_stopped_terminates_running_guard(tmp_path, monkeypatch):
+    pidfile = tmp_path / "g.pid"
+    pidfile.write_text("424242")  # a "running guard"
+    killed = []
+    monkeypatch.setattr(gate, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(gate.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    monitor = MagicMock()
+    ctx, _config_cls = _patch_gate(monitor)
+    with ctx:
+        rc = gate.main(["stopped", "--pidfile", str(pidfile)])
+
+    assert rc == 0
+    assert (424242, gate.signal.SIGTERM) in killed
+    assert not pidfile.exists()  # pidfile cleared
+    monitor.apply.assert_called_once_with(title="", live=False)
+
+
+# ---------------------------------------------------------------------------
+# _run_guard — watch mode
+# ---------------------------------------------------------------------------
+
+
+def _guard_args(tmp_path, extra=None):
+    argv = [
+        "started", "--watch",
+        "--watch-poll", "0",
+        "--twitch-timeout", "0",
+        "--twitch-poll", "0",
+        "--offline-confirm", "2",
+        "--pidfile", str(tmp_path / "g.pid"),
+    ] + (extra or [])
+    return gate._parse_args(argv)
+
+
+def test_guard_enables_then_pauses_when_stream_ends(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    # wait consumes the first (live) read; then two offline reads confirm the end.
+    monitor.twitch.get_stream.side_effect = [
+        {"title": "Spark stream"},  # go-live (consumed by _wait_for_live_stream)
+        None,                        # offline 1/2 -> tentative, keep enabled
+        None,                        # offline 2/2 -> confirmed end
+    ]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    # Enabled while live (twice, once per surviving poll), paused once at the end.
+    enable_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is True]
+    pause_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is False]
+    assert len(enable_calls) == 2
+    assert all(c.args[0] == "Spark stream" for c in enable_calls)
+    assert len(pause_calls) == 1
+    assert not (tmp_path / "g.pid").exists()  # slot released on exit
+
+
+def test_guard_pauses_and_exits_when_never_live(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    monitor.twitch.get_stream.return_value = None  # never live
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    monitor.apply.assert_called_once_with("", live=False)  # default-deny, then exit
+
+
+def test_guard_single_read_blip_does_not_tear_down(tmp_path, monkeypatch):
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    # live, one blip (offline 1/2), live again, then a confirmed end (2 offline).
+    monitor.twitch.get_stream.side_effect = [
+        {"title": "Spark"},  # go-live
+        None,                 # blip 1/2
+        {"title": "Spark"},  # recovered -> resets counter
+        None,                 # offline 1/2
+        None,                 # offline 2/2 -> end
+    ]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    pause_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is False]
+    assert len(pause_calls) == 1  # only torn down once, at the real end
+
+
+# ---------------------------------------------------------------------------
+# Guard single-instance (pidfile)
+# ---------------------------------------------------------------------------
+
+
+def test_acquire_guard_slot_supersedes_previous(tmp_path, monkeypatch):
+    pidfile = tmp_path / "g.pid"
+    pidfile.write_text("424242")  # an existing live guard
+    killed = []
+    monkeypatch.setattr(gate, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(gate.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    gate._acquire_guard_slot(str(pidfile))
+
+    assert (424242, gate.signal.SIGTERM) in killed
+    assert pidfile.read_text().strip() == str(gate.os.getpid())
+
+
+def test_release_guard_slot_only_removes_own(tmp_path):
+    pidfile = tmp_path / "g.pid"
+    pidfile.write_text(str(gate.os.getpid()))
+    gate._release_guard_slot(str(pidfile))
+    assert not pidfile.exists()
+
+    # A pidfile owned by someone else is left alone.
+    pidfile.write_text("999999")
+    gate._release_guard_slot(str(pidfile))
+    assert pidfile.exists()
