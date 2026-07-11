@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 import time
 from typing import Any, NoReturn, Optional
 
@@ -62,10 +63,18 @@ return null;
 
 logger = logging.getLogger(__name__)
 
+_REDDIT_HOME = "https://www.reddit.com/"
 _LOGIN_URL = "https://www.reddit.com/login/"
 _ADS_HOME = "https://ads.reddit.com/"
 _ADS_API_BASE = "https://ads-api.reddit.com/api/v3"
+# ads.reddit.com redirects to the business.reddit.com marketing page unless
+# the URL is scoped to an ads account — the real dashboard lives at
+# /account/{ads_account_id}/dashboard.
+_ACCOUNT_DASHBOARD = "https://ads.reddit.com/account/{account_id}/dashboard"
 _CAMPAIGN_DEEP_LINK = "https://ads.reddit.com/dashboard/campaigns/{campaign_id}"
+_ACCOUNT_CAMPAIGN_DEEP_LINK = (
+    "https://ads.reddit.com/account/{account_id}/dashboard/campaigns/{campaign_id}"
+)
 _USER_AGENT = (
     "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
     "(KHTML, like Gecko) Chrome/145.0.0.0 Safari/537.36"
@@ -73,16 +82,47 @@ _USER_AGENT = (
 
 _LOGIN_TIMEOUT_SEC = 30
 _PAGE_TIMEOUT_SEC = 30
+# After landing on ads.reddit.com, a logged-in session bounces through a
+# client-side redirect to the account-scoped dashboard. Poll current_url until
+# it's decisive (account dashboard / business marketing / login) so we don't
+# read it mid-redirect and miss the /account/<id>/ path.
+_ADS_SETTLE_TIMEOUT_SEC = 10
+_ADS_SETTLE_POLL_SEC = 0.5
+# Dwell on the reddit.com homepage before going to the login form. A cold hit
+# straight to /login trips Reddit's "blocked by network security" page; a real
+# user lands on the homepage first, which sets the edge cookies / clears the JS
+# challenge that let /login through. Give that a beat to settle.
+_HOMEPAGE_SETTLE_SEC = 4
+# Selectors for the homepage "Log In" control, tried in order. Reddit has
+# shipped several shapes of this button; _find_in_shadow_dom pierces shadow DOM.
+_LOGIN_CONTROL_SELECTORS = (
+    "a[href^='/login']",
+    "a[href*='/login']",
+    "a[href*='login']",
+    "[data-testid='login-button']",
+    "#login-button",
+)
+# Pulls the ads account id out of a dashboard URL like
+# https://ads.reddit.com/account/gun0aswfhklt/dashboard
+_ACCOUNT_ID_RE = re.compile(r"ads\.reddit\.com/account/([^/?#]+)")
 # How long to wait after navigating to ads.reddit.com for the dashboard's JS
 # to bootstrap and refresh the token_v2 cookie. Empirical; keep it short
 # because this fires on the (rare) 401-retry path.
 _TOKEN_REFRESH_SETTLE_SEC = 3
 
 _CAPTCHA_TITLE_MARKERS = ("prove your humanity", "verify you are human")
+# Reddit's edge serves this page when it doesn't like the client (cold hit on
+# /login, datacenter IP, VPN, ...). Observed text: "You've been blocked by
+# network security."
+_BLOCK_PAGE_MARKERS = ("blocked by network security",)
 
 
 class RedditCaptchaRequired(RuntimeError):
     """Raised when Reddit's login flow is gated by a CAPTCHA that needs a human."""
+
+
+class RedditBlockedError(RuntimeError):
+    """Raised when Reddit's edge serves its "blocked by network security" page."""
 
 
 class RedditAdClient:
@@ -101,16 +141,26 @@ class RedditAdClient:
         username: str,
         password: str,
         *,
+        ads_account_id: str = "",
         cookie_jar_path: str = "",
         patch_body_pause: str = '{"data":{"configured_status":"PAUSED"}}',
         patch_body_resume: str = '{"data":{"configured_status":"ACTIVE"}}',
         headless: bool = True,
         driver: Optional[WebDriver] = None,
     ) -> None:
-        if not username or not password:
-            raise ValueError("RedditAdClient requires both username and password.")
+        if not cookie_jar_path and (not username or not password):
+            raise ValueError(
+                "RedditAdClient needs a username and password to log in, or a "
+                "cookie_jar_path to restore a saved session."
+            )
         self.username = username
         self.password = password
+        # Optional. When empty, it's auto-discovered after login: a logged-in
+        # visit to ads.reddit.com redirects to ads.reddit.com/account/<id>/
+        # dashboard, and we read the id out of that URL. Setting it explicitly
+        # (REDDIT_ADS_ACCOUNT_ID) just skips discovery / picks a specific
+        # account when the login has more than one.
+        self.ads_account_id = ads_account_id
         self.cookie_jar_path = cookie_jar_path
         self.patch_body_pause = patch_body_pause
         self.patch_body_resume = patch_body_resume
@@ -177,6 +227,44 @@ class RedditAdClient:
         self._authenticated = False
 
     # ------------------------------------------------------------------
+    # URLs
+    # ------------------------------------------------------------------
+
+    @property
+    def _ads_home_url(self) -> str:
+        """The logged-in dashboard URL (account-scoped when the id is known)."""
+        if self.ads_account_id:
+            return _ACCOUNT_DASHBOARD.format(account_id=self.ads_account_id)
+        return _ADS_HOME
+
+    def _campaign_url(self, campaign_id: str) -> str:
+        if self.ads_account_id:
+            return _ACCOUNT_CAMPAIGN_DEEP_LINK.format(
+                account_id=self.ads_account_id, campaign_id=campaign_id
+            )
+        return _CAMPAIGN_DEEP_LINK.format(campaign_id=campaign_id)
+
+    def _capture_account_id_from_url(self) -> None:
+        """Learn the ads account id from the current (post-login) dashboard URL.
+
+        A logged-in hit on bare ads.reddit.com redirects to
+        ads.reddit.com/account/<id>/dashboard. Capture that id so later
+        navigations (campaign deep links, token refresh) are account-scoped
+        without the operator having to configure it. No-op if already known
+        or if the URL isn't account-scoped (e.g. an account picker).
+        """
+        if self.ads_account_id:
+            return
+        try:
+            current = self.driver.current_url or ""
+        except WebDriverException:
+            return
+        match = _ACCOUNT_ID_RE.search(current)
+        if match:
+            self.ads_account_id = match.group(1)
+            logger.info("Discovered Reddit ads account id: %s", self.ads_account_id)
+
+    # ------------------------------------------------------------------
     # Authentication
     # ------------------------------------------------------------------
 
@@ -189,6 +277,14 @@ class RedditAdClient:
             logger.info("Reddit session restored from %s.", self.cookie_jar_path)
             self._authenticated = True
             return
+
+        if not (self.username and self.password):
+            raise RuntimeError(
+                "Reddit cookie jar did not restore a live session and no "
+                "REDDIT_USERNAME/REDDIT_PASSWORD are set to log in with. "
+                "Re-run scripts/bootstrap_reddit_session.py to refresh the "
+                f"session at {self.cookie_jar_path or '<no cookie jar configured>'}."
+            )
 
         self._login_via_form()
         self._save_session()
@@ -209,8 +305,15 @@ class RedditAdClient:
         if not cookies:
             return False
 
+        # Load the persisted account id first so navigation is account-scoped
+        # and doesn't have to rely on the bare-host redirect.
+        jar_account = jar.get("ads_account_id")
+        if jar_account and not self.ads_account_id:
+            self.ads_account_id = jar_account
+            logger.info("Loaded ads account id from cookie jar: %s", jar_account)
+
         # Selenium requires you to be on a domain before adding its cookies.
-        self.driver.get(_ADS_HOME)
+        self.driver.get(self._ads_home_url)
         for cookie in cookies:
             try:
                 self.driver.add_cookie(cookie)
@@ -224,11 +327,33 @@ class RedditAdClient:
                 local_storage,
             )
 
-        self.driver.get(_ADS_HOME)
+        self.driver.get(self._ads_home_url)
+        self._settle_ads_dashboard()
         return self._is_logged_in()
 
+    def _settle_ads_dashboard(self) -> None:
+        """Wait for ads.reddit.com's post-load redirect to reach a decisive URL.
+
+        A logged-in hit on ads.reddit.com bounces through a client-side
+        redirect to ``/account/<id>/dashboard``; reading ``current_url`` too
+        early misses that path (which is where the account id lives) and can
+        momentarily look logged-out. Poll until the URL is decisive — account
+        dashboard, business.reddit.com marketing (logged out), or /login — then
+        let the caller inspect it. Best-effort: returns after the timeout even
+        if nothing decisive appears.
+        """
+        deadline = time.monotonic() + _ADS_SETTLE_TIMEOUT_SEC
+        while time.monotonic() < deadline:
+            try:
+                low = (self.driver.current_url or "").lower()
+            except WebDriverException:
+                return
+            if "/account/" in low or "business.reddit.com" in low or "login" in low:
+                return
+            time.sleep(_ADS_SETTLE_POLL_SEC)
+
     def _save_session(self) -> None:
-        """Persist cookies + localStorage to disk (if cookie_jar_path is set)."""
+        """Persist cookies + localStorage + account id to disk (if path set)."""
         if not self.cookie_jar_path:
             return
         cookies = self.driver.get_cookies()
@@ -241,21 +366,37 @@ class RedditAdClient:
         )
         try:
             with open(self.cookie_jar_path, "w", encoding="utf-8") as fh:
-                json.dump({"cookies": cookies, "local_storage": local_storage}, fh)
+                json.dump(
+                    {
+                        "cookies": cookies,
+                        "local_storage": local_storage,
+                        "ads_account_id": self.ads_account_id,
+                    },
+                    fh,
+                )
         except OSError as exc:
             logger.warning("Could not persist cookie jar to %s: %s", self.cookie_jar_path, exc)
 
     def _is_logged_in(self) -> bool:
-        """Heuristic: dashboard navigates back to login if we're not logged in."""
+        """True when we're on an ads.reddit.com dashboard URL.
+
+        A logged-out session redirects off ads.reddit.com — to /login or to
+        the business.reddit.com marketing page — neither of which contains the
+        ``ads.reddit.com`` host, so the substring check distinguishes both.
+        Opportunistically captures the account id from the URL when present.
+        """
         try:
-            current = self.driver.current_url
+            current = self.driver.current_url or ""
         except WebDriverException:
             return False
-        return "ads.reddit.com" in current and "login" not in current.lower()
+        logged_in = "ads.reddit.com" in current and "login" not in current.lower()
+        if logged_in:
+            self._capture_account_id_from_url()
+        return logged_in
 
     def _login_via_form(self) -> None:
         logger.info("Reddit login: submitting credentials for user '%s'.", self.username)
-        self.driver.get(_LOGIN_URL)
+        self._open_login_form()
         if self._is_captcha_page():
             raise RedditCaptchaRequired(
                 "Reddit served a CAPTCHA challenge before the login form."
@@ -293,26 +434,82 @@ class RedditAdClient:
         # the form's submit handler reliably.
         password_field.send_keys(Keys.RETURN)
 
-        # Wait for redirect off the login page or for an error to surface.
+        # The login form may be a full /login page or an overlay on the
+        # homepage, so URL-watching only covers one of the two shapes. The
+        # ``reddit_session`` cookie appearing is the reliable success signal
+        # for both.
         wait = WebDriverWait(self.driver, _LOGIN_TIMEOUT_SEC)
         try:
-            wait.until(lambda d: "login" not in d.current_url.lower())
+            wait.until(lambda d: self._has_session_cookie())
         except TimeoutException as exc:
+            self._raise_if_blocked("submitting the login form")
             if self._is_captcha_page():
                 raise RedditCaptchaRequired(
                     "Reddit served a CAPTCHA after the login form was submitted."
                 ) from exc
             self._raise_with_diagnostics(
-                "login submitted but didn't redirect off /login (bad creds, CAPTCHA, or 2FA)",
+                "login submitted but no reddit_session cookie appeared "
+                "(bad creds, CAPTCHA, or 2FA)",
                 exc,
             )
 
+        # A logged-in hit on bare ads.reddit.com redirects to the account
+        # dashboard (ads.reddit.com/account/<id>/dashboard); _is_logged_in
+        # captures that id. A logged-out session lands on business.reddit.com
+        # instead, which _is_logged_in rejects.
         self.driver.get(_ADS_HOME)
+        self._settle_ads_dashboard()
         if not self._is_logged_in():
             self._raise_with_diagnostics(
-                "redirected off /login but ads dashboard isn't accessible",
+                "logged into reddit.com but the ads dashboard isn't accessible "
+                "(landed on business.reddit.com — the ads session may not have "
+                "propagated, or this account has no ads access)",
                 RuntimeError("dashboard inaccessible"),
             )
+
+    def _open_login_form(self) -> None:
+        """Navigate to the login form the way a human does, to dodge the block.
+
+        Cold-hitting /login trips Reddit's "blocked by network security" page.
+        A real user loads the homepage first — which sets the edge cookies and
+        clears the JS challenge — waits for it to settle, then clicks Log In.
+        We mirror that exactly: homepage, dwell, click. Only if no login
+        control is found do we navigate to /login, and even then we're already
+        warmed up by the homepage visit, so it's no longer a cold hit.
+        """
+        self.driver.get(_REDDIT_HOME)
+        self._raise_if_blocked("loading reddit.com")
+        # Let the homepage settle: edge cookies get set and the JS challenge
+        # clears. Skipping this is what makes /login look like a cold hit.
+        time.sleep(_HOMEPAGE_SETTLE_SEC)
+
+        control = self._find_login_control()
+        if control is not None:
+            try:
+                control.click()
+                self._raise_if_blocked("opening the login form")
+                return
+            except WebDriverException:
+                logger.debug(
+                    "Homepage login control not clickable; navigating to /login "
+                    "(already warmed up by the homepage visit).",
+                    exc_info=True,
+                )
+        else:
+            logger.debug(
+                "No homepage login control found; navigating to /login "
+                "(already warmed up by the homepage visit)."
+            )
+        self.driver.get(_LOGIN_URL)
+        self._raise_if_blocked("opening the login form")
+
+    def _find_login_control(self):
+        """Find the homepage 'Log In' control, trying several known shapes."""
+        for selector in _LOGIN_CONTROL_SELECTORS:
+            element = self._find_in_shadow_dom(selector)
+            if element is not None:
+                return element
+        return None
 
     def _is_captcha_page(self) -> bool:
         try:
@@ -320,6 +517,30 @@ class RedditAdClient:
         except WebDriverException:
             return False
         return any(marker in title for marker in _CAPTCHA_TITLE_MARKERS)
+
+    def _is_blocked_page(self) -> bool:
+        try:
+            title = (self.driver.title or "").lower()
+            source = (self.driver.page_source or "").lower()
+        except WebDriverException:
+            return False
+        return any(m in title or m in source for m in _BLOCK_PAGE_MARKERS)
+
+    def _raise_if_blocked(self, when: str) -> None:
+        if self._is_blocked_page():
+            raise RedditBlockedError(
+                f"Reddit's network security blocked this browser while {when}. "
+                "This is IP/fingerprint reputation, not bad credentials — "
+                "retry in a minute, avoid VPN/datacenter egress, or complete "
+                "the login manually in the bootstrap window."
+            )
+
+    def _has_session_cookie(self) -> bool:
+        """True once Reddit has issued the logged-in ``reddit_session`` cookie."""
+        try:
+            return self.driver.get_cookie("reddit_session") is not None
+        except WebDriverException:
+            return False
 
     def _find_in_shadow_dom(self, css_selector: str):
         """Walk all shadow roots looking for the first match. None if absent."""
@@ -407,10 +628,10 @@ class RedditAdClient:
         Uses ``driver.get_cookies()`` which sees HttpOnly cookies (notably
         ``token_v2`` and ``reddit_session``) that JS in-page can't read.
         """
-        # Make sure we've actually visited ads.reddit.com so the dashboard's
-        # cookies are present in the jar.
+        # Make sure we've actually visited the ads dashboard so its cookies
+        # are present in the jar.
         if "ads.reddit.com" not in (self.driver.current_url or ""):
-            self.driver.get(_ADS_HOME)
+            self.driver.get(self._ads_home_url)
 
         cookies = self.driver.get_cookies()
         token_v2 = next((c["value"] for c in cookies if c["name"] == "token_v2"), "")
@@ -430,7 +651,7 @@ class RedditAdClient:
         session.headers.update({
             "Authorization": f"Bearer {token_v2}",
             "Origin": _ADS_HOME.rstrip("/"),
-            "Referer": _ADS_HOME,
+            "Referer": self._ads_home_url,
             "User-Agent": _USER_AGENT,
             "sec-ch-ua": '"Chromium";v="145", "Not:A-Brand";v="99"',
             "sec-ch-ua-mobile": "?0",
@@ -456,7 +677,7 @@ class RedditAdClient:
             except Exception:
                 pass
             self._http_session = None
-        self.driver.get(_ADS_HOME)
+        self.driver.get(self._ads_home_url)
         time.sleep(_TOKEN_REFRESH_SETTLE_SEC)
         self._http_session = self._build_http_session()
 
@@ -483,7 +704,7 @@ class RedditAdClient:
     def _click_toggle(self, campaign_id: str, event_type: str) -> None:
         """UI fallback: navigate to the campaign and click pause/resume."""
         wanted_action = "resume" if event_type == "manual_activate" else "pause"
-        self.driver.get(_CAMPAIGN_DEEP_LINK.format(campaign_id=campaign_id))
+        self.driver.get(self._campaign_url(campaign_id))
         wait = WebDriverWait(self.driver, _PAGE_TIMEOUT_SEC)
 
         # Try several plausible selectors. The dashboard's exact selectors

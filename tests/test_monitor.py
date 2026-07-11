@@ -19,6 +19,7 @@ REQUIRED_ENV = {
     "TWITCH_CHANNEL_LOGIN": "streamer",
     "REDDIT_USERNAME": "ads_user",
     "REDDIT_PASSWORD": "ads_password",
+    "REDDIT_ADS_ACCOUNT_ID": "acct123",
     "REDDIT_CAMPAIGN_ID": "camp_456",
 }
 
@@ -341,3 +342,148 @@ def test_run_calls_disable_all_before_first_poll():
         monitor.run(stop_after=1)
 
     assert call_order[0] == "disable", "disable_all must be called before the first poll"
+
+
+# ---------------------------------------------------------------------------
+# TrafficStars wiring
+# ---------------------------------------------------------------------------
+
+
+def _make_dual_network_monitor(stream_sequence, rules):
+    cfg = _make_config(rules)
+    cfg.trafficstars_api_key = "ts_key"
+
+    twitch = MagicMock()
+    twitch.get_stream.side_effect = stream_sequence
+    reddit = MagicMock()
+    trafficstars = MagicMock()
+
+    monitor = StreamAdMonitor(
+        cfg,
+        twitch_client=twitch,
+        reddit_ad_client=reddit,
+        trafficstars_client=trafficstars,
+    )
+    return monitor, twitch, reddit, trafficstars
+
+
+def test_check_enables_campaigns_on_both_networks():
+    rules = [
+        Rule(
+            name="Spark",
+            keywords=["Spark"],
+            campaign_ids=["reddit_camp"],
+            trafficstars_campaign_ids=["123"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor(
+        [_live("Spark stream")], rules
+    )
+    monitor.check()
+
+    reddit.enable_campaign.assert_called_once_with("reddit_camp")
+    trafficstars.enable_campaign.assert_called_once_with("123")
+    assert monitor._rule_enabled[0] is True
+
+
+def test_check_disables_campaigns_on_both_networks_when_stream_ends():
+    rules = [
+        Rule(
+            name="Spark",
+            keywords=["Spark"],
+            campaign_ids=["reddit_camp"],
+            trafficstars_campaign_ids=["123"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor(
+        [_live("Spark stream"), None], rules
+    )
+    monitor.check()
+    monitor.check()
+
+    reddit.disable_campaign.assert_called_once_with("reddit_camp")
+    trafficstars.disable_campaign.assert_called_once_with("123")
+    assert monitor._rule_enabled[0] is False
+
+
+def test_trafficstars_only_rule_never_touches_reddit():
+    rules = [
+        Rule(
+            name="TS only",
+            keywords=["Spark"],
+            trafficstars_campaign_ids=["123", "456"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor(
+        [_live("Spark stream"), None], rules
+    )
+    monitor.check()
+    monitor.check()
+
+    reddit.enable_campaign.assert_not_called()
+    reddit.disable_campaign.assert_not_called()
+    assert trafficstars.enable_campaign.call_count == 2
+    assert trafficstars.disable_campaign.call_count == 2
+
+
+def test_disable_all_covers_both_networks():
+    rules = [
+        Rule(
+            name="Spark",
+            keywords=["Spark"],
+            campaign_ids=["reddit_camp"],
+            trafficstars_campaign_ids=["123"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor([], rules)
+    monitor.disable_all()
+
+    reddit.disable_campaign.assert_called_once_with("reddit_camp")
+    trafficstars.disable_campaign.assert_called_once_with("123")
+
+
+def test_disable_all_tolerates_trafficstars_errors():
+    rules = [
+        Rule(
+            name="Spark",
+            keywords=["Spark"],
+            campaign_ids=["reddit_camp"],
+            trafficstars_campaign_ids=["123"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor([], rules)
+    trafficstars.disable_campaign.side_effect = RuntimeError("API error")
+
+    monitor.disable_all()  # must not raise
+
+    reddit.disable_campaign.assert_called_once_with("reddit_camp")
+    assert monitor._rule_enabled == [False]
+
+
+def test_no_reddit_client_constructed_for_trafficstars_only_config():
+    """A TrafficStars-only setup must not require Reddit creds or Chromium."""
+    rules = [
+        Rule(name="TS", keywords=["Spark"], trafficstars_campaign_ids=["123"]),
+    ]
+    cfg = _make_config(rules)
+    cfg.reddit_username = ""
+    cfg.reddit_password = ""
+    cfg.trafficstars_api_key = "ts_key"
+
+    monitor = StreamAdMonitor(cfg, twitch_client=MagicMock())
+
+    assert monitor.reddit is None
+    assert monitor.trafficstars is not None
+
+
+def test_no_trafficstars_client_constructed_for_reddit_only_config():
+    rules = [
+        Rule(name="Reddit", keywords=["Spark"], campaign_ids=["reddit_camp"]),
+    ]
+    cfg = _make_config(rules)
+
+    monitor = StreamAdMonitor(
+        cfg, twitch_client=MagicMock(), reddit_ad_client=MagicMock()
+    )
+
+    assert monitor.trafficstars is None

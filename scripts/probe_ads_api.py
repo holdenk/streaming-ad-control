@@ -31,12 +31,13 @@ def main() -> int:
     client = RedditAdClient(
         username=os.environ.get("REDDIT_USERNAME", ""),
         password=os.environ.get("REDDIT_PASSWORD", ""),
+        ads_account_id=os.environ.get("REDDIT_ADS_ACCOUNT_ID", ""),
         cookie_jar_path=os.environ.get("REDDIT_COOKIE_JAR", ""),
     )
     try:
         client.authenticate()
-        client.driver.get("https://ads.reddit.com/")
-        print(f"after .get('https://ads.reddit.com/'), current_url = {client.driver.current_url!r}")
+        client.driver.get(client._ads_home_url)
+        print(f"after .get({client._ads_home_url!r}), current_url = {client.driver.current_url!r}")
         print(f"page title = {client.driver.title!r}")
 
         # Save a screenshot so we can see if Chromium is actually on the dashboard.

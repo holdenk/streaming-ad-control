@@ -1,13 +1,15 @@
-"""Main monitoring loop that ties Twitch stream detection to Reddit ad control."""
+"""Main monitoring loop tying Twitch stream detection to ad-network control."""
 
 from __future__ import annotations
 
 import logging
 import time
-from typing import List, Optional
+from typing import List, Optional, Tuple
 
 from .config import Config
 from .reddit_ad_client import RedditAdClient
+from .rules import Rule
+from .trafficstars_client import TrafficStarsClient
 from .twitch_client import TwitchClient
 
 logger = logging.getLogger(__name__)
@@ -18,16 +20,25 @@ def title_has_keyword(title: str, keyword: str) -> bool:
     return keyword.lower() in title.lower()
 
 
+def _rule_campaign_count(rule: Rule) -> int:
+    return len(rule.campaign_ids) + len(rule.trafficstars_campaign_ids)
+
+
 class StreamAdMonitor:
-    """Polls Twitch and manages Reddit campaigns based on stream state.
+    """Polls Twitch and manages ad campaigns based on stream state.
 
     For each configured rule, the monitor independently tracks whether that
     rule's campaigns are currently enabled. A rule's campaigns are enabled
     when the stream is live **and** the title matches at least one of the
-    rule's keywords, and disabled otherwise.
+    rule's keywords, and disabled otherwise. Each rule may target Reddit
+    campaigns, TrafficStars campaigns, or both.
 
-    State transitions only — selenium toggles are issued at most once per
+    State transitions only — network toggles are issued at most once per
     edge, so there are no redundant enable/disable operations.
+
+    Ad-network clients are only constructed for networks that at least one
+    rule targets, so e.g. a TrafficStars-only setup never launches the
+    headless Chromium that the Reddit client needs.
     """
 
     def __init__(
@@ -35,21 +46,47 @@ class StreamAdMonitor:
         config: Config,
         twitch_client: Optional[TwitchClient] = None,
         reddit_ad_client: Optional[RedditAdClient] = None,
+        trafficstars_client: Optional[TrafficStarsClient] = None,
     ) -> None:
         self.config = config
         self.twitch = twitch_client or TwitchClient(
             config.twitch_client_id,
             config.twitch_client_secret,
         )
-        self.reddit = reddit_ad_client or RedditAdClient(
-            username=config.reddit_username,
-            password=config.reddit_password,
-            cookie_jar_path=config.reddit_cookie_jar_path,
-            patch_body_pause=config.reddit_patch_body_pause,
-            patch_body_resume=config.reddit_patch_body_resume,
+
+        needs_reddit = any(rule.campaign_ids for rule in config.rules)
+        needs_trafficstars = any(
+            rule.trafficstars_campaign_ids for rule in config.rules
         )
+
+        self.reddit = reddit_ad_client
+        if self.reddit is None and needs_reddit:
+            self.reddit = RedditAdClient(
+                username=config.reddit_username,
+                password=config.reddit_password,
+                ads_account_id=config.reddit_ads_account_id,
+                cookie_jar_path=config.reddit_cookie_jar_path,
+                patch_body_pause=config.reddit_patch_body_pause,
+                patch_body_resume=config.reddit_patch_body_resume,
+            )
+
+        self.trafficstars = trafficstars_client
+        if self.trafficstars is None and needs_trafficstars:
+            self.trafficstars = TrafficStarsClient(config.trafficstars_api_key)
+
         # Per-rule enabled flag; indexed in the same order as config.rules.
         self._rule_enabled: List[bool] = [False] * len(config.rules)
+
+    def _rule_targets(self, rule: Rule) -> List[Tuple[str, object, List[str]]]:
+        """Yield (network_name, client, campaign_ids) for the rule's networks."""
+        targets = []
+        if rule.campaign_ids and self.reddit is not None:
+            targets.append(("reddit", self.reddit, rule.campaign_ids))
+        if rule.trafficstars_campaign_ids and self.trafficstars is not None:
+            targets.append(
+                ("trafficstars", self.trafficstars, rule.trafficstars_campaign_ids)
+            )
+        return targets
 
     # ------------------------------------------------------------------
     # Single poll cycle (public for testability)
@@ -70,10 +107,11 @@ class StreamAdMonitor:
                     "Enabling %d campaign(s).",
                     rule.name,
                     title,
-                    len(rule.campaign_ids),
+                    _rule_campaign_count(rule),
                 )
-                for campaign_id in rule.campaign_ids:
-                    self.reddit.enable_campaign(campaign_id)
+                for _network, client, campaign_ids in self._rule_targets(rule):
+                    for campaign_id in campaign_ids:
+                        client.enable_campaign(campaign_id)
                 self._rule_enabled[idx] = True
 
             elif not should_enable and currently_enabled:
@@ -81,11 +119,12 @@ class StreamAdMonitor:
                 logger.info(
                     "Rule '%s': disabling %d campaign(s) (%s).",
                     rule.name,
-                    len(rule.campaign_ids),
+                    _rule_campaign_count(rule),
                     reason,
                 )
-                for campaign_id in rule.campaign_ids:
-                    self.reddit.disable_campaign(campaign_id)
+                for _network, client, campaign_ids in self._rule_targets(rule):
+                    for campaign_id in campaign_ids:
+                        client.disable_campaign(campaign_id)
                 self._rule_enabled[idx] = False
 
             else:
@@ -111,15 +150,18 @@ class StreamAdMonitor:
             len(self.config.rules),
         )
         for idx, rule in enumerate(self.config.rules):
-            for campaign_id in rule.campaign_ids:
-                try:
-                    self.reddit.disable_campaign(campaign_id)
-                except Exception:
-                    logger.exception(
-                        "Startup: failed to disable campaign '%s' for rule '%s'; continuing.",
-                        campaign_id,
-                        rule.name,
-                    )
+            for network, client, campaign_ids in self._rule_targets(rule):
+                for campaign_id in campaign_ids:
+                    try:
+                        client.disable_campaign(campaign_id)
+                    except Exception:
+                        logger.exception(
+                            "Startup: failed to disable %s campaign '%s' for "
+                            "rule '%s'; continuing.",
+                            network,
+                            campaign_id,
+                            rule.name,
+                        )
             self._rule_enabled[idx] = False
 
     # ------------------------------------------------------------------

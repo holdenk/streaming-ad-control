@@ -1,11 +1,17 @@
 # rules.example.yaml
 #
 # Copy this file to rules.yaml (or any path) and set RULES_FILE to point to it.
-# Each rule maps one or more title keywords to one or more Reddit campaign IDs.
-# Keyword matching is case-insensitive.
+# Each rule maps one or more title keywords to campaigns on one or both ad
+# networks. Keyword matching is case-insensitive.
 #
-# Find your campaign IDs in the URL bar of the ads.reddit.com dashboard when
-# viewing a campaign — the long numeric ID after /campaigns/ is what you want.
+# Reddit:        `campaign_ids` (alias: `reddit_campaign_ids`). Find the ID in
+#                the URL bar of the ads.reddit.com dashboard when viewing a
+#                campaign — the long numeric ID after /campaigns/.
+# TrafficStars:  `trafficstars_campaign_ids`. Find the numeric ID in the
+#                campaign list at admin.trafficstars.com. Requires
+#                TRAFFICSTARS_API_KEY in the environment.
+#
+# A rule may list campaigns for either network or both.
 #
 # Usage:
 #   export RULES_FILE=/path/to/rules.yaml
@@ -15,8 +21,10 @@ rules:
   - name: "Spark streams"
     keywords:
       - Spark
-    campaign_ids:
+    campaign_ids:                # Reddit
       - "2470329120103230906"
+    trafficstars_campaign_ids:   # TrafficStars
+      - "123456"
 
   - name: "Home Assistant streams"
     keywords:
@@ -26,9 +34,9 @@ rules:
       - "2470329120103231000"
       - "2470329120103231001"
 
-  - name: "Python streams"
+  - name: "Python streams (TrafficStars only)"
     keywords:
       - Python
       - PyData
-    campaign_ids:
-      - "2470329120103231002"
+    trafficstars_campaign_ids:
+      - "654321"

@@ -20,6 +20,7 @@ BASE_ENV = {
     "TWITCH_CHANNEL_LOGIN": "some_channel",
     "REDDIT_USERNAME": "ads_user",
     "REDDIT_PASSWORD": "ads_password",
+    "REDDIT_ADS_ACCOUNT_ID": "acct123",
 }
 
 # Legacy single-rule env vars
@@ -89,6 +90,7 @@ def test_legacy_config_loads_all_required_env_vars():
     assert cfg.twitch_channel_login == "some_channel"
     assert cfg.reddit_username == "ads_user"
     assert cfg.reddit_password == "ads_password"
+    assert cfg.reddit_ads_account_id == "acct123"
 
 
 def test_legacy_config_creates_single_rule():
@@ -240,3 +242,100 @@ def test_yaml_config_raises_when_rule_has_no_campaigns(tmp_path):
     with patch.dict(os.environ, env, clear=True):
         with pytest.raises(ValueError, match="no campaign_ids"):
             Config()
+
+
+# ---------------------------------------------------------------------------
+# TrafficStars settings
+# ---------------------------------------------------------------------------
+
+# Twitch-only env — used to prove per-network creds are only required when a
+# rule actually targets that network.
+TWITCH_ONLY_ENV = {
+    "TWITCH_CLIENT_ID": "twitch_id",
+    "TWITCH_CLIENT_SECRET": "twitch_secret",
+    "TWITCH_CHANNEL_LOGIN": "some_channel",
+}
+
+
+def _write_ts_only_rules(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent("""
+            rules:
+              - name: "TS only"
+                keywords:
+                  - Spark
+                trafficstars_campaign_ids:
+                  - 123456
+        """)
+    )
+    return rules_yaml
+
+
+def test_trafficstars_only_rules_do_not_require_reddit_creds(tmp_path):
+    rules_yaml = _write_ts_only_rules(tmp_path)
+    env = {
+        **TWITCH_ONLY_ENV,
+        "RULES_FILE": str(rules_yaml),
+        "TRAFFICSTARS_API_KEY": "ts_key",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert cfg.trafficstars_api_key == "ts_key"
+    assert cfg.reddit_username == ""
+    assert cfg.reddit_password == ""
+    assert cfg.reddit_ads_account_id == ""
+
+
+def test_trafficstars_rules_require_api_key(tmp_path):
+    rules_yaml = _write_ts_only_rules(tmp_path)
+    env = {**TWITCH_ONLY_ENV, "RULES_FILE": str(rules_yaml)}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValueError, match="TRAFFICSTARS_API_KEY"):
+            Config()
+
+
+def test_reddit_only_rules_do_not_require_trafficstars_key():
+    with patch.dict(os.environ, LEGACY_ENV, clear=True):
+        cfg = Config()
+    assert cfg.trafficstars_api_key == ""
+
+
+def test_reddit_account_id_is_optional():
+    """The ads account id is auto-discovered after login, so it's not required."""
+    env = {k: v for k, v in LEGACY_ENV.items() if k != "REDDIT_ADS_ACCOUNT_ID"}
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert cfg.reddit_ads_account_id == ""
+
+
+def test_reddit_account_id_override_is_honored():
+    with patch.dict(os.environ, LEGACY_ENV, clear=True):
+        cfg = Config()
+    assert cfg.reddit_ads_account_id == "acct123"
+
+
+def test_legacy_trafficstars_campaign_id_creates_single_rule():
+    env = {
+        **TWITCH_ONLY_ENV,
+        "TRAFFICSTARS_CAMPAIGN_ID": "123456",
+        "TRAFFICSTARS_API_KEY": "ts_key",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert len(cfg.rules) == 1
+    assert cfg.rules[0].campaign_ids == []
+    assert cfg.rules[0].trafficstars_campaign_ids == ["123456"]
+
+
+def test_legacy_both_campaign_ids_land_in_one_rule():
+    env = {
+        **LEGACY_ENV,
+        "TRAFFICSTARS_CAMPAIGN_ID": "123456",
+        "TRAFFICSTARS_API_KEY": "ts_key",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert len(cfg.rules) == 1
+    assert cfg.rules[0].campaign_ids == ["2470329120103230906"]
+    assert cfg.rules[0].trafficstars_campaign_ids == ["123456"]

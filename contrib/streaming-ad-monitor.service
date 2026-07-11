@@ -1,6 +1,6 @@
 # /etc/systemd/system/streaming-ad-monitor.service
 #
-# Systemd unit for the Twitch → Reddit Ads stream monitor.
+# Systemd unit for the Twitch → Reddit Ads / TrafficStars stream monitor.
 # Tested on Ubuntu 25.04+ (systemd 257+).
 #
 # Installation:
@@ -15,7 +15,7 @@
 #   sudo journalctl -u streaming-ad-monitor -f
 
 [Unit]
-Description=Twitch stream → Reddit Ads monitor
+Description=Twitch stream → Reddit Ads / TrafficStars monitor
 Documentation=https://github.com/holdenk/streaming-ad-control
 After=network-online.target
 Wants=network-online.target
@@ -35,12 +35,19 @@ Group=streaming-ad-monitor
 #   TWITCH_CLIENT_ID=...
 #   TWITCH_CLIENT_SECRET=...
 #   TWITCH_CHANNEL_LOGIN=...
-#   REDDIT_CLIENT_ID=...
-#   REDDIT_CLIENT_SECRET=...
-#   REDDIT_ADS_ACCOUNT_ID=...
+#
+# Required when any rule targets Reddit campaigns:
+#   REDDIT_USERNAME=...
+#   REDDIT_PASSWORD=...
+#   REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
+#   # REDDIT_ADS_ACCOUNT_ID=...  # optional; auto-discovered after login
+#
+# Required when any rule targets TrafficStars campaigns:
+#   TRAFFICSTARS_API_KEY=...
 #
 # Optional (if not using RULES_FILE):
-#   REDDIT_AD_GROUP_ID=...
+#   REDDIT_CAMPAIGN_ID=...
+#   TRAFFICSTARS_CAMPAIGN_ID=...
 #   TRIGGER_KEYWORD=Spark
 #   POLL_INTERVAL=60
 #   LOG_LEVEL=INFO               # DEBUG for verbose output (default INFO)
@@ -49,6 +56,15 @@ EnvironmentFile=/etc/streaming-ad-monitor/env
 # Path to the YAML rules file (see rules.example.yaml).
 # Remove or comment out this line to fall back to legacy single-rule env vars.
 Environment=RULES_FILE=/etc/streaming-ad-monitor/rules.yaml
+
+# Headless Chromium (used for Reddit) refuses to start without a writable
+# HOME/XDG profile directory, and the Reddit cookie jar needs a writable
+# path too.  StateDirectory= creates /var/lib/streaming-ad-monitor owned by
+# the service user and exempts it from ProtectSystem=strict.
+StateDirectory=streaming-ad-monitor
+Environment=HOME=/var/lib/streaming-ad-monitor
+Environment=XDG_CONFIG_HOME=/var/lib/streaming-ad-monitor/.config
+Environment=XDG_CACHE_HOME=/var/lib/streaming-ad-monitor/.cache
 
 WorkingDirectory=/opt/streaming-ad-monitor
 

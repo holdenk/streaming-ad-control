@@ -44,11 +44,23 @@ class Config:
     Rules can be supplied in one of two ways (in order of precedence):
 
     1. **YAML file** – set ``RULES_FILE`` to the path of a YAML file.
-       See ``rules.example.yaml`` for the expected structure.
-    2. **Legacy env vars** – set ``REDDIT_CAMPAIGN_ID`` (required) and
-       ``TRIGGER_KEYWORD`` (optional, default ``Spark``). A single rule is
-       synthesised automatically from these values. ``REDDIT_AD_GROUP_ID``
-       is accepted as a deprecated alias.
+       See ``rules.example.yaml`` for the expected structure. Rules may
+       target Reddit campaigns (``campaign_ids``), TrafficStars campaigns
+       (``trafficstars_campaign_ids``), or both.
+    2. **Legacy env vars** – set ``REDDIT_CAMPAIGN_ID`` and/or
+       ``TRAFFICSTARS_CAMPAIGN_ID`` plus ``TRIGGER_KEYWORD`` (optional,
+       default ``Spark``). A single rule is synthesised automatically from
+       these values. ``REDDIT_AD_GROUP_ID`` is accepted as a deprecated
+       alias for ``REDDIT_CAMPAIGN_ID``.
+
+    Per-network credentials are only required when at least one rule
+    targets that network:
+
+    * Reddit: ``REDDIT_USERNAME`` + ``REDDIT_PASSWORD``. The ads account id
+      is auto-discovered after login; ``REDDIT_ADS_ACCOUNT_ID`` is an
+      optional override.
+    * TrafficStars: ``TRAFFICSTARS_API_KEY`` (generate on
+      https://admin.trafficstars.com/profile/)
     """
 
     def __init__(self) -> None:
@@ -57,9 +69,33 @@ class Config:
         self.twitch_client_secret: str = _require("TWITCH_CLIENT_SECRET")
         self.twitch_channel_login: str = _require("TWITCH_CHANNEL_LOGIN")
 
+        # How often to poll Twitch (seconds)
+        self.poll_interval: int = int(os.environ.get("POLL_INTERVAL", "60"))
+
+        # Load rules ---------------------------------------------------
+        rules_file = os.environ.get("RULES_FILE")
+        if rules_file:
+            self.rules: List[Rule] = load_rules_from_yaml(rules_file)
+        else:
+            self.rules = [self._legacy_rule_from_env()]
+
+        needs_reddit = any(rule.campaign_ids for rule in self.rules)
+        needs_trafficstars = any(
+            rule.trafficstars_campaign_ids for rule in self.rules
+        )
+
         # Reddit Ads settings — selenium drives the ads.reddit.com dashboard.
-        self.reddit_username: str = _require("REDDIT_USERNAME")
-        self.reddit_password: str = _require("REDDIT_PASSWORD")
+        # Only required when at least one rule targets a Reddit campaign.
+        self.reddit_username: str = _require("REDDIT_USERNAME") if needs_reddit else ""
+        self.reddit_password: str = _require("REDDIT_PASSWORD") if needs_reddit else ""
+        # Optional. The ads account id from the dashboard URL
+        # (ads.reddit.com/account/<id>/dashboard). When unset, the client
+        # auto-discovers it after login (a logged-in hit on ads.reddit.com
+        # redirects to the account-scoped dashboard). Set it to skip discovery
+        # or to pin a specific account when the login has more than one.
+        self.reddit_ads_account_id: str = _sanitize(
+            os.environ.get("REDDIT_ADS_ACCOUNT_ID", "")
+        )
         # Optional: where to persist cookies + localStorage between runs so
         # we don't re-login every poll. Empty string disables persistence.
         self.reddit_cookie_jar_path: str = _sanitize(
@@ -74,39 +110,51 @@ class Config:
             os.environ.get("REDDIT_PATCH_BODY_RESUME", _DEFAULT_PATCH_BODY_RESUME)
         )
 
-        # How often to poll Twitch (seconds)
-        self.poll_interval: int = int(os.environ.get("POLL_INTERVAL", "60"))
-
-        # Load rules ---------------------------------------------------
-        rules_file = os.environ.get("RULES_FILE")
-        if rules_file:
-            self.rules: List[Rule] = load_rules_from_yaml(rules_file)
-        else:
-            campaign_id = (
-                os.environ.get("REDDIT_CAMPAIGN_ID")
-                or os.environ.get("REDDIT_AD_GROUP_ID")
-            )
-            if not campaign_id:
-                raise ValueError(
-                    "Required environment variable 'REDDIT_CAMPAIGN_ID' is not set "
-                    "(and no RULES_FILE was provided)."
-                )
-            keyword = os.environ.get("TRIGGER_KEYWORD", "Spark")
-            self.rules = [
-                Rule(
-                    name="default",
-                    keywords=[keyword],
-                    campaign_ids=[_sanitize(campaign_id)],
-                )
-            ]
+        # TrafficStars settings — plain REST API, authenticated with the
+        # account API key. Only required when a rule targets TrafficStars.
+        self.trafficstars_api_key: str = (
+            _require("TRAFFICSTARS_API_KEY") if needs_trafficstars else ""
+        )
 
         logger.info(
             "Config loaded: twitch_client_id=%s, reddit_user=%s, "
-            "channel=%s, poll_interval=%d, rules=%d, cookie_jar=%s",
+            "trafficstars_key=%s, channel=%s, poll_interval=%d, rules=%d, "
+            "cookie_jar=%s",
             mask_credential(self.twitch_client_id),
-            mask_credential(self.reddit_username),
+            mask_credential(self.reddit_username) if needs_reddit else "<unused>",
+            mask_credential(self.trafficstars_api_key)
+            if needs_trafficstars
+            else "<unused>",
             self.twitch_channel_login,
             self.poll_interval,
             len(self.rules),
             self.reddit_cookie_jar_path or "<not persisted>",
+        )
+
+    @staticmethod
+    def _legacy_rule_from_env() -> Rule:
+        """Synthesise a single rule from the pre-YAML environment variables."""
+        reddit_campaign_id = (
+            os.environ.get("REDDIT_CAMPAIGN_ID")
+            or os.environ.get("REDDIT_AD_GROUP_ID")
+        )
+        trafficstars_campaign_id = os.environ.get("TRAFFICSTARS_CAMPAIGN_ID")
+        if not reddit_campaign_id and not trafficstars_campaign_id:
+            raise ValueError(
+                "Required environment variable 'REDDIT_CAMPAIGN_ID' (or "
+                "'TRAFFICSTARS_CAMPAIGN_ID') is not set, and no RULES_FILE "
+                "was provided."
+            )
+        keyword = os.environ.get("TRIGGER_KEYWORD", "Spark")
+        return Rule(
+            name="default",
+            keywords=[keyword],
+            campaign_ids=(
+                [_sanitize(reddit_campaign_id)] if reddit_campaign_id else []
+            ),
+            trafficstars_campaign_ids=(
+                [_sanitize(trafficstars_campaign_id)]
+                if trafficstars_campaign_id
+                else []
+            ),
         )
