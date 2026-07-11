@@ -1,0 +1,206 @@
+"""Tests for scripts/obs_title_gate.py (the OBS event-driven ad gate)."""
+
+import importlib.util
+import os
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+# The gate is a CLI script under scripts/, not a package module. Load it by path.
+_GATE_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))),
+    "scripts",
+    "obs_title_gate.py",
+)
+_spec = importlib.util.spec_from_file_location("obs_title_gate", _GATE_PATH)
+gate = importlib.util.module_from_spec(_spec)
+_spec.loader.exec_module(gate)
+
+
+# ---------------------------------------------------------------------------
+# _load_env_file
+# ---------------------------------------------------------------------------
+
+
+def test_load_env_file_sets_variables(tmp_path):
+    env_file = tmp_path / "gate.env"
+    env_file.write_text(
+        "# a comment\n"
+        "\n"
+        "REDDIT_CAMPAIGN_ID=camp_1\n"
+        "export TRIGGER_KEYWORD=Spark\n"
+        'REDDIT_COOKIE_JAR="/tmp/jar.json"\n'
+    )
+    with patch.dict(os.environ, {}, clear=True):
+        count = gate._load_env_file(str(env_file))
+        assert os.environ["REDDIT_CAMPAIGN_ID"] == "camp_1"
+        assert os.environ["TRIGGER_KEYWORD"] == "Spark"  # 'export ' stripped
+        assert os.environ["REDDIT_COOKIE_JAR"] == "/tmp/jar.json"  # quotes stripped
+    assert count == 3
+
+
+def test_load_env_file_does_not_override_existing(tmp_path):
+    env_file = tmp_path / "gate.env"
+    env_file.write_text("LOG_LEVEL=DEBUG\n")
+    with patch.dict(os.environ, {"LOG_LEVEL": "INFO"}, clear=True):
+        gate._load_env_file(str(env_file))
+        assert os.environ["LOG_LEVEL"] == "INFO"  # real env wins
+
+
+def test_load_env_file_skips_malformed_lines(tmp_path):
+    env_file = tmp_path / "gate.env"
+    env_file.write_text("this_has_no_equals\nGOOD=yes\n")
+    with patch.dict(os.environ, {}, clear=True):
+        count = gate._load_env_file(str(env_file))
+        assert os.environ["GOOD"] == "yes"
+        assert "this_has_no_equals" not in os.environ
+    assert count == 1
+
+
+# ---------------------------------------------------------------------------
+# _wait_for_live_stream
+# ---------------------------------------------------------------------------
+
+
+def test_wait_returns_stream_when_live_on_first_poll():
+    twitch = MagicMock()
+    live = {"title": "Spark stream"}
+    twitch.get_stream.return_value = live
+    sleep = MagicMock()
+
+    result = gate._wait_for_live_stream(
+        twitch, "chan", timeout=45, poll_interval=3, sleep=sleep, now=lambda: 0.0
+    )
+
+    assert result is live
+    sleep.assert_not_called()
+
+
+def test_wait_polls_until_live():
+    twitch = MagicMock()
+    live = {"title": "Spark stream"}
+    twitch.get_stream.side_effect = [None, None, live]
+    sleep = MagicMock()
+
+    # now() stays at 0, so the deadline (0 + 45) is never reached; the loop
+    # exits only when the stream becomes live.
+    result = gate._wait_for_live_stream(
+        twitch, "chan", timeout=45, poll_interval=3, sleep=sleep, now=lambda: 0.0
+    )
+
+    assert result is live
+    assert twitch.get_stream.call_count == 3
+    assert sleep.call_count == 2
+
+
+def test_wait_times_out_and_returns_none():
+    twitch = MagicMock()
+    twitch.get_stream.return_value = None
+    sleep = MagicMock()
+    # now() sequence: deadline read (0) → 0+45=45; then 0 (< 45, poll once) → 50 (>= 45, give up).
+    times = iter([0.0, 0.0, 50.0])
+
+    result = gate._wait_for_live_stream(
+        twitch, "chan", timeout=45, poll_interval=3, sleep=sleep, now=lambda: next(times)
+    )
+
+    assert result is None
+    assert sleep.call_count == 1
+
+
+def test_wait_swallows_transient_errors():
+    twitch = MagicMock()
+    live = {"title": "Spark stream"}
+    twitch.get_stream.side_effect = [RuntimeError("blip"), live]
+    sleep = MagicMock()
+
+    result = gate._wait_for_live_stream(
+        twitch, "chan", timeout=45, poll_interval=3, sleep=sleep, now=lambda: 0.0
+    )
+
+    assert result is live
+    assert sleep.call_count == 1
+
+
+# ---------------------------------------------------------------------------
+# main() — event dispatch (Config + StreamAdMonitor mocked out)
+# ---------------------------------------------------------------------------
+
+
+def _patch_gate(monitor):
+    """Patch Config + StreamAdMonitor in the gate module to return mocks.
+
+    Returns (context_manager, config_cls_mock) — the class mock reference stays
+    valid after the context exits, so require_twitch assertions can run outside.
+    """
+    config = MagicMock()
+    config.twitch_channel_login = "chan"
+    config_cls = MagicMock(return_value=config)
+    monitor_cls = MagicMock(return_value=monitor)
+    ctx = patch.multiple(gate, Config=config_cls, StreamAdMonitor=monitor_cls)
+    return ctx, config_cls
+
+
+def test_main_stopped_pauses_everything_without_twitch():
+    monitor = MagicMock()
+    ctx, config_cls = _patch_gate(monitor)
+    with ctx:
+        rc = gate.main(["stopped"])
+
+    assert rc == 0
+    monitor.apply.assert_called_once_with(title="", live=False)
+    monitor.close.assert_called_once_with()
+    # 'stopped' never needs Twitch.
+    config_cls.assert_called_once_with(require_twitch=False)
+
+
+def test_main_started_with_explicit_title_skips_twitch():
+    monitor = MagicMock()
+    ctx, config_cls = _patch_gate(monitor)
+    with ctx:
+        rc = gate.main(["started", "--title", "Apache Spark deep dive"])
+
+    assert rc == 0
+    monitor.apply.assert_called_once_with(title="Apache Spark deep dive", live=True)
+    config_cls.assert_called_once_with(require_twitch=False)
+
+
+def test_main_started_reads_title_from_twitch():
+    monitor = MagicMock()
+    monitor.twitch.get_stream.return_value = {"title": "Live Spark coding"}
+    ctx, config_cls = _patch_gate(monitor)
+    with ctx:
+        rc = gate.main(["started"])
+
+    assert rc == 0
+    monitor.apply.assert_called_once_with(title="Live Spark coding", live=True)
+    config_cls.assert_called_once_with(require_twitch=True)
+
+
+def test_main_started_defaults_deny_when_twitch_never_live():
+    monitor = MagicMock()
+    monitor.twitch.get_stream.return_value = None  # never live
+    ctx, _config_cls = _patch_gate(monitor)
+    with ctx:
+        # tiny timeout/poll so the wait resolves immediately
+        rc = gate.main(["started", "--twitch-timeout", "0", "--twitch-poll", "0"])
+
+    assert rc == 0
+    monitor.apply.assert_called_once_with(title="", live=False)
+
+
+def test_main_returns_2_on_bad_env_file(tmp_path):
+    missing = tmp_path / "nope.env"
+    rc = gate.main(["stopped", "--env-file", str(missing)])
+    assert rc == 2
+
+
+def test_main_returns_1_when_apply_raises():
+    monitor = MagicMock()
+    monitor.apply.side_effect = RuntimeError("toggle failed")
+    ctx, _config_cls = _patch_gate(monitor)
+    with ctx:
+        rc = gate.main(["stopped"])
+
+    assert rc == 1
+    monitor.close.assert_called_once_with()  # still cleaned up

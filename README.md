@@ -160,6 +160,76 @@ sudo systemctl daemon-reload
 sudo systemctl enable --now streaming-ad-monitor
 ```
 
+## OBS integration (event-driven, no polling)
+
+The daemon above polls Twitch on a timer. If you'd rather flip the campaign the
+instant you go live (and pause it the instant you stop), OBS can drive it
+directly. Two pieces:
+
+- **`contrib/obs_ad_control.py`** — an OBS script (load via **Tools → Scripts →
+  +**). It hooks OBS's streaming start/stop events and shells out to the gate
+  below. It never does network or Selenium work itself — that would run on OBS's
+  UI thread and freeze the window — it only launches a detached subprocess in
+  your venv and returns.
+- **`scripts/obs_title_gate.py`** — the one-shot CLI the OBS script calls. On
+  `started` it resolves the current title and enables the campaigns whose
+  keywords match; on `stopped` it pauses every campaign. It's default-deny:
+  anything it can't confirm as a live, on-topic stream stays paused, so ad spend
+  never runs on an off-topic or mistitled stream.
+
+### Wiring it up
+
+1. Bootstrap the Reddit session and confirm the toggles work (the sections
+   above).
+2. Copy the sample env file and fill it in:
+
+   ```sh
+   cp contrib/obs-ad-control.env.example ~/.config/obs-ad-control.env
+   chmod 600 ~/.config/obs-ad-control.env
+   ```
+
+   With `REDDIT_COOKIE_JAR` set, the gate runs headlessly off the saved session
+   — no Reddit username/password needed.
+3. In OBS, load `contrib/obs_ad_control.py` and set its properties:
+   - **Python executable** — the interpreter in your venv (e.g.
+     `~/.venvs/py313/bin/python`).
+   - **streaming-ad-control directory** — your checkout.
+   - **Env file** — the file from step 2.
+   - Leave **Read live title from Twitch** on to read your title automatically;
+     turn it off to gate on a manually-typed title instead.
+4. Go live. Watch the OBS **Script Log** and the configured gate log file.
+
+You can exercise the gate without OBS:
+
+```sh
+# went live — read the title from Twitch (rides out its go-live lag)
+python scripts/obs_title_gate.py started --env-file ~/.config/obs-ad-control.env
+
+# went live with an explicit title (no Twitch lookup)
+python scripts/obs_title_gate.py started --title "Apache Spark deep dive"
+
+# stopped — pause everything (never needs Twitch creds)
+python scripts/obs_title_gate.py stopped --env-file ~/.config/obs-ad-control.env
+```
+
+### Title source and the Twitch go-live lag
+
+OBS knows *when* you go live but not your Twitch title, so by default the gate
+reads the title from Twitch's API. That API lags OBS by a few seconds, so the
+gate polls until the channel reports live (up to `--twitch-timeout`, default
+45s) before reading the title. Prefer not to involve Twitch at all? Pass
+`--title` (or use manual-title mode in the OBS script) and no Twitch
+credentials are required.
+
+### Clean vs. unclean stops
+
+A normal **Stop Streaming** fires the `stopped` hook and pauses everything. If
+OBS is force-killed or crashes, it can't fire that hook, and the campaign would
+stay active. For a guaranteed teardown, also run the polling daemon (`run.py`)
+as a backstop: it independently pauses campaigns when the stream ends or the
+title stops matching. The daemon and the OBS gate compute the *same* desired
+state from the *same* title, so running both is safe — they don't fight.
+
 ## Long-running notes
 
 - **`token_v2` rotation (~24h):** handled automatically. On 401, the client

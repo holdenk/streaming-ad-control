@@ -136,6 +136,80 @@ class StreamAdMonitor:
                 )
 
     # ------------------------------------------------------------------
+    # Stateless desired-state application (for external triggers)
+    # ------------------------------------------------------------------
+
+    def apply(self, title: str, live: bool) -> None:
+        """Drive every campaign to its desired state for one ``(title, live)`` snapshot.
+
+        This is the stateless counterpart to :meth:`check`. ``check`` runs
+        inside the polling loop and toggles a campaign only on an *edge* (it
+        diffs against the in-process ``_rule_enabled`` tracker); ``apply`` is
+        for one-shot, externally-triggered invocations — e.g. an OBS
+        streaming-start/stop hook — where the process is short-lived and there
+        is no prior state to diff against. It therefore sets the desired state
+        directly. Re-activating an already-active campaign or pausing an
+        already-paused one is idempotent on both networks.
+
+        Default-deny: a campaign is enabled only when ``live`` is True **and**
+        the title matches its rule; every other case (offline, off-topic title,
+        unknown title) pauses it, so ad spend never runs on a stream that isn't
+        live and on-topic.
+
+        Every campaign is attempted even if some toggles raise, so a single
+        failure can't strand the others in the wrong state. If any toggle
+        failed, a :class:`RuntimeError` summarising them is raised at the end.
+        """
+        errors: List[str] = []
+        for idx, rule in enumerate(self.config.rules):
+            should_enable = live and rule.matches_title(title)
+            logger.info(
+                "Rule '%s': %s %d campaign(s) (live=%s, title=%r).",
+                rule.name,
+                "enabling" if should_enable else "pausing",
+                _rule_campaign_count(rule),
+                live,
+                title,
+            )
+            for network, client, campaign_ids in self._rule_targets(rule):
+                for campaign_id in campaign_ids:
+                    try:
+                        if should_enable:
+                            client.enable_campaign(campaign_id)
+                        else:
+                            client.disable_campaign(campaign_id)
+                    except Exception as exc:
+                        verb = "enable" if should_enable else "disable"
+                        logger.exception(
+                            "Rule '%s': failed to %s %s campaign '%s'; continuing.",
+                            rule.name,
+                            verb,
+                            network,
+                            campaign_id,
+                        )
+                        errors.append(f"{verb} {network}:{campaign_id} ({exc!r})")
+            self._rule_enabled[idx] = should_enable
+
+        if errors:
+            raise RuntimeError(
+                f"{len(errors)} campaign toggle(s) failed: " + "; ".join(errors)
+            )
+
+    def close(self) -> None:
+        """Release the ad-network clients (headless browser, HTTP sessions). Idempotent.
+
+        The polling loop runs forever and never calls this, but one-shot callers
+        such as the OBS gate should, so the headless Chromium is shut down
+        promptly instead of lingering until process exit.
+        """
+        for client in (self.reddit, self.trafficstars):
+            if client is not None:
+                try:
+                    client.close()
+                except Exception:
+                    logger.debug("Client close raised; ignoring.", exc_info=True)
+
+    # ------------------------------------------------------------------
     # Startup housekeeping
     # ------------------------------------------------------------------
 
