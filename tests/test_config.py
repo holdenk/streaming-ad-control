@@ -339,3 +339,68 @@ def test_legacy_both_campaign_ids_land_in_one_rule():
     assert len(cfg.rules) == 1
     assert cfg.rules[0].campaign_ids == ["2470329120103230906"]
     assert cfg.rules[0].trafficstars_campaign_ids == ["123456"]
+
+
+# ---------------------------------------------------------------------------
+# require_twitch flag (OBS gate: stop / explicit-title paths don't need Twitch)
+# ---------------------------------------------------------------------------
+
+
+def test_require_twitch_false_allows_missing_twitch_creds():
+    """With require_twitch=False, a Reddit-only setup needs no Twitch creds."""
+    env = {
+        "REDDIT_CAMPAIGN_ID": "camp_1",
+        "REDDIT_COOKIE_JAR": "/tmp/jar.json",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config(require_twitch=False)
+    assert cfg.twitch_client_id == ""
+    assert cfg.twitch_client_secret == ""
+    assert cfg.twitch_channel_login == ""
+    assert cfg.rules[0].campaign_ids == ["camp_1"]
+
+
+def test_require_twitch_true_is_the_default():
+    """Default construction still mandates Twitch creds (daemon behaviour)."""
+    env = {"REDDIT_CAMPAIGN_ID": "camp_1", "REDDIT_COOKIE_JAR": "/tmp/jar.json"}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValueError, match="TWITCH_CLIENT_ID"):
+            Config()
+
+
+def test_require_twitch_false_still_reads_twitch_when_present():
+    env = {
+        **TWITCH_ONLY_ENV,
+        "REDDIT_CAMPAIGN_ID": "camp_1",
+        "REDDIT_COOKIE_JAR": "/tmp/jar.json",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config(require_twitch=False)
+    assert cfg.twitch_channel_login == "some_channel"
+
+
+# ---------------------------------------------------------------------------
+# Reddit credentials are optional when a cookie jar is configured
+# ---------------------------------------------------------------------------
+
+
+def test_reddit_cookie_jar_makes_login_creds_optional():
+    """A bootstrapped cookie jar means the daemon needs no Reddit user/pass."""
+    env = {
+        **TWITCH_ONLY_ENV,
+        "REDDIT_CAMPAIGN_ID": "camp_1",
+        "REDDIT_COOKIE_JAR": "/tmp/jar.json",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert cfg.reddit_username == ""
+    assert cfg.reddit_password == ""
+    assert cfg.reddit_cookie_jar_path == "/tmp/jar.json"
+
+
+def test_reddit_without_cookie_jar_still_requires_login_creds():
+    """No cookie jar → credentials are the only way in, so they're required."""
+    env = {**TWITCH_ONLY_ENV, "REDDIT_CAMPAIGN_ID": "camp_1"}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValueError, match="REDDIT_USERNAME"):
+            Config()

@@ -63,11 +63,24 @@ class Config:
       https://admin.trafficstars.com/profile/)
     """
 
-    def __init__(self) -> None:
-        # Twitch settings
-        self.twitch_client_id: str = _require("TWITCH_CLIENT_ID")
-        self.twitch_client_secret: str = _require("TWITCH_CLIENT_SECRET")
-        self.twitch_channel_login: str = _require("TWITCH_CHANNEL_LOGIN")
+    def __init__(self, *, require_twitch: bool = True) -> None:
+        # Twitch settings. The polling daemon always needs these. Externally
+        # triggered callers that don't poll Twitch — e.g. the OBS gate handling
+        # a stop event, or a start event with an explicit --title — pass
+        # ``require_twitch=False`` so a missing Twitch credential can't stop
+        # them from pausing (or explicitly toggling) a campaign.
+        if require_twitch:
+            self.twitch_client_id: str = _require("TWITCH_CLIENT_ID")
+            self.twitch_client_secret: str = _require("TWITCH_CLIENT_SECRET")
+            self.twitch_channel_login: str = _require("TWITCH_CHANNEL_LOGIN")
+        else:
+            self.twitch_client_id = _sanitize(os.environ.get("TWITCH_CLIENT_ID", ""))
+            self.twitch_client_secret = _sanitize(
+                os.environ.get("TWITCH_CLIENT_SECRET", "")
+            )
+            self.twitch_channel_login = _sanitize(
+                os.environ.get("TWITCH_CHANNEL_LOGIN", "")
+            )
 
         # How often to poll Twitch (seconds)
         self.poll_interval: int = int(os.environ.get("POLL_INTERVAL", "60"))
@@ -85,9 +98,23 @@ class Config:
         )
 
         # Reddit Ads settings — selenium drives the ads.reddit.com dashboard.
-        # Only required when at least one rule targets a Reddit campaign.
-        self.reddit_username: str = _require("REDDIT_USERNAME") if needs_reddit else ""
-        self.reddit_password: str = _require("REDDIT_PASSWORD") if needs_reddit else ""
+        # Optional: where to persist cookies + localStorage between runs so we
+        # don't re-login every poll. Empty string disables persistence. Read
+        # first because it decides whether the login credentials are required.
+        self.reddit_cookie_jar_path: str = _sanitize(
+            os.environ.get("REDDIT_COOKIE_JAR", "")
+        )
+        # Username/password are only required when a rule targets Reddit *and*
+        # there's no bootstrapped cookie jar to restore a session from. With a
+        # cookie jar (the recommended setup — see bootstrap_reddit_session.py)
+        # the client runs headlessly off the saved session and never needs
+        # them; this mirrors RedditAdClient's own constructor contract.
+        if needs_reddit and not self.reddit_cookie_jar_path:
+            self.reddit_username: str = _require("REDDIT_USERNAME")
+            self.reddit_password: str = _require("REDDIT_PASSWORD")
+        else:
+            self.reddit_username = _sanitize(os.environ.get("REDDIT_USERNAME", ""))
+            self.reddit_password = _sanitize(os.environ.get("REDDIT_PASSWORD", ""))
         # Optional. The ads account id from the dashboard URL
         # (ads.reddit.com/account/<id>/dashboard). When unset, the client
         # auto-discovers it after login (a logged-in hit on ads.reddit.com
@@ -95,11 +122,6 @@ class Config:
         # or to pin a specific account when the login has more than one.
         self.reddit_ads_account_id: str = _sanitize(
             os.environ.get("REDDIT_ADS_ACCOUNT_ID", "")
-        )
-        # Optional: where to persist cookies + localStorage between runs so
-        # we don't re-login every poll. Empty string disables persistence.
-        self.reddit_cookie_jar_path: str = _sanitize(
-            os.environ.get("REDDIT_COOKIE_JAR", "")
         )
         # Optional: override the JSON body sent on the campaigns PATCH if the
         # dashboard's exact shape differs from the documented default.
@@ -120,8 +142,10 @@ class Config:
             "Config loaded: twitch_client_id=%s, reddit_user=%s, "
             "trafficstars_key=%s, channel=%s, poll_interval=%d, rules=%d, "
             "cookie_jar=%s",
-            mask_credential(self.twitch_client_id),
-            mask_credential(self.reddit_username) if needs_reddit else "<unused>",
+            mask_credential(self.twitch_client_id) if self.twitch_client_id else "<unused>",
+            mask_credential(self.reddit_username)
+            if needs_reddit and self.reddit_username
+            else ("<cookie-jar>" if needs_reddit else "<unused>"),
             mask_credential(self.trafficstars_api_key)
             if needs_trafficstars
             else "<unused>",

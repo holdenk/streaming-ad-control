@@ -18,6 +18,14 @@ Credentials are only required for networks your rules actually use — a
 TrafficStars-only setup never launches Chromium and doesn't need Reddit
 credentials.
 
+Two ways to drive it, usable together or on their own:
+
+- **Polling daemon** (`run.py`) — a systemd service that polls the Twitch API
+  on a timer. Needs Twitch API credentials. Setup below.
+- **[OBS integration](#obs-integration-event-driven-no-polling)** — OBS's own
+  start/stop events flip the campaigns the instant you go live, with **no
+  Twitch API credentials at all**. Jump there if you don't want a daemon.
+
 ## Architecture (Reddit)
 
 Two things conspire to make this awkward:
@@ -62,14 +70,19 @@ sudo /opt/streaming-ad-monitor/venv/bin/poetry --directory /opt/streaming-ad-mon
 sudo mkdir /etc/streaming-ad-monitor
 sudo cp rules.example.yaml /etc/streaming-ad-monitor/rules.yaml  # then edit
 sudo tee /etc/streaming-ad-monitor/env <<'EOF'
+# Your channel name — always needed. Not a secret.
+TWITCH_CHANNEL_LOGIN=...
+# Twitch API credentials (https://dev.twitch.tv/console). Required by the
+# polling daemon below. NOT needed for the OBS integration, which reads the
+# title from Twitch's public endpoint — see "OBS integration".
 TWITCH_CLIENT_ID=...
 TWITCH_CLIENT_SECRET=...
-TWITCH_CHANNEL_LOGIN=...
-# Required when any rule targets Reddit campaigns:
-REDDIT_USERNAME=...
-REDDIT_PASSWORD=...
-# Where to persist the Reddit session between runs
+# Where to persist the Reddit session between runs. With this set (see
+# "One-time bootstrap"), no Reddit username/password is needed.
 REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
+# Only required when a rule targets Reddit and there's NO cookie jar above:
+# REDDIT_USERNAME=...
+# REDDIT_PASSWORD=...
 # Optional: ads account id (ads.reddit.com/account/<id>/dashboard).
 # Auto-discovered after login when unset.
 # REDDIT_ADS_ACCOUNT_ID=...
@@ -159,6 +172,98 @@ sudo cp contrib/streaming-ad-monitor.service /etc/systemd/system/
 sudo systemctl daemon-reload
 sudo systemctl enable --now streaming-ad-monitor
 ```
+
+## OBS integration (event-driven, no polling)
+
+The daemon above polls Twitch on a timer. If you'd rather flip the campaign the
+instant you go live (and pause it the instant you stop), OBS can drive it
+directly. Two pieces:
+
+- **`contrib/obs_ad_control.py`** — an OBS script (load via **Tools → Scripts →
+  +**). It hooks OBS's streaming start/stop events and shells out to the gate
+  below. It never does network or Selenium work itself — that would run on OBS's
+  UI thread and freeze the window — it only launches a detached subprocess in
+  your venv and returns.
+- **`scripts/obs_title_gate.py`** — the CLI the OBS script calls. On `started`
+  it resolves the current title and enables the campaigns whose keywords match;
+  on `stopped` it pauses every campaign. It's default-deny: anything it can't
+  confirm as a live, on-topic stream stays paused, so ad spend never runs on an
+  off-topic or mistitled stream. With `--watch` it stays running as a guard (see
+  below).
+
+### No Twitch credentials required
+
+OBS knows *when* you go live but not your Twitch title, so the gate reads the
+title from Twitch. By default it uses Twitch's **public** endpoint — the same
+one the Twitch website uses — which needs **no developer app and no
+credentials**, only your channel name (`TWITCH_CHANNEL_LOGIN`, which isn't a
+secret). So the whole integration works with zero Twitch setup.
+
+Two other title sources exist if you want them:
+
+- `--title-source helix` reads from the official Helix API instead. This one
+  *does* need credentials — register an app at <https://dev.twitch.tv/console>
+  and set `TWITCH_CLIENT_ID` + `TWITCH_CLIENT_SECRET`.
+- `--title "..."` (or the OBS "Manual title" source) skips Twitch entirely — no
+  network, no credentials, but you supply the title yourself.
+
+Either way, Twitch's API lags OBS by a few seconds when you go live, so the gate
+polls until the channel reports live (up to `--twitch-timeout`, default 45s)
+before reading the title.
+
+### Watch mode (the crash-safe guard)
+
+A normal **Stop Streaming** fires the `stopped` hook and pauses everything
+instantly. But if OBS is force-killed it can't fire that hook — so with
+**watch** on (the default), going live launches a detached **guard** instead of
+a one-shot: it enables the matching campaign, then keeps polling Twitch and
+**pauses the campaign the moment the stream actually ends**, then exits. Because
+it polls independently, it tears the campaign down even if OBS crashed. Only one
+guard runs at a time (a stop/restart supersedes the old one), and the `stopped`
+hook also stops it for an instant clean teardown. The guard needs no always-on
+daemon — it lives only for the duration of one stream.
+
+### Wiring it up
+
+1. Bootstrap the Reddit session and confirm the toggles work (the sections
+   above).
+2. Copy the sample env file and fill it in:
+
+   ```sh
+   cp contrib/obs-ad-control.env.example ~/.config/obs-ad-control.env
+   chmod 600 ~/.config/obs-ad-control.env
+   ```
+
+   With `REDDIT_COOKIE_JAR` set, the gate runs headlessly off the saved session
+   — no Reddit username/password needed.
+3. In OBS, load `contrib/obs_ad_control.py` and set its properties:
+   - **Python executable** — the interpreter in your venv (e.g.
+     `~/.venvs/py313/bin/python`).
+   - **streaming-ad-control directory** — your checkout.
+   - **Env file** — the file from step 2.
+   - **Title source** — leave on *Twitch — automatic, no credentials*.
+   - Leave **Watch until the stream ends** on for crash-safe teardown.
+4. Go live. Watch the OBS **Script Log** and the configured gate log file.
+
+You can exercise the gate without OBS:
+
+```sh
+# went live — public (no-creds) auto title, watch until the stream ends
+python scripts/obs_title_gate.py started --watch --env-file ~/.config/obs-ad-control.env
+
+# went live — one-shot, public (no-creds) auto title
+python scripts/obs_title_gate.py started --env-file ~/.config/obs-ad-control.env
+
+# went live with an explicit title (no Twitch, no creds)
+python scripts/obs_title_gate.py started --title "Apache Spark deep dive"
+
+# stopped — stop the guard and pause everything (never needs Twitch)
+python scripts/obs_title_gate.py stopped --env-file ~/.config/obs-ad-control.env
+```
+
+The polling daemon (`run.py`) still works as an alternative or an extra
+backstop: it and the gate compute the *same* desired state from the *same*
+title, so running both is safe — they don't fight.
 
 ## Long-running notes
 
