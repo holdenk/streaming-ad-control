@@ -18,6 +18,14 @@ Credentials are only required for networks your rules actually use — a
 TrafficStars-only setup never launches Chromium and doesn't need Reddit
 credentials.
 
+Two ways to drive it, usable together or on their own:
+
+- **Polling daemon** (`run.py`) — a systemd service that polls the Twitch API
+  on a timer. Needs Twitch API credentials. Setup below.
+- **[OBS integration](#obs-integration-event-driven-no-polling)** — OBS's own
+  start/stop events flip the campaigns the instant you go live, with **no
+  Twitch API credentials at all**. Jump there if you don't want a daemon.
+
 ## Architecture (Reddit)
 
 Two things conspire to make this awkward:
@@ -62,14 +70,19 @@ sudo /opt/streaming-ad-monitor/venv/bin/poetry --directory /opt/streaming-ad-mon
 sudo mkdir /etc/streaming-ad-monitor
 sudo cp rules.example.yaml /etc/streaming-ad-monitor/rules.yaml  # then edit
 sudo tee /etc/streaming-ad-monitor/env <<'EOF'
+# Your channel name — always needed. Not a secret.
+TWITCH_CHANNEL_LOGIN=...
+# Twitch API credentials (https://dev.twitch.tv/console). Required by the
+# polling daemon below. NOT needed for the OBS integration, which reads the
+# title from Twitch's public endpoint — see "OBS integration".
 TWITCH_CLIENT_ID=...
 TWITCH_CLIENT_SECRET=...
-TWITCH_CHANNEL_LOGIN=...
-# Required when any rule targets Reddit campaigns:
-REDDIT_USERNAME=...
-REDDIT_PASSWORD=...
-# Where to persist the Reddit session between runs
+# Where to persist the Reddit session between runs. With this set (see
+# "One-time bootstrap"), no Reddit username/password is needed.
 REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
+# Only required when a rule targets Reddit and there's NO cookie jar above:
+# REDDIT_USERNAME=...
+# REDDIT_PASSWORD=...
 # Optional: ads account id (ads.reddit.com/account/<id>/dashboard).
 # Auto-discovered after login when unset.
 # REDDIT_ADS_ACCOUNT_ID=...

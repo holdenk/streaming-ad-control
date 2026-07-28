@@ -76,8 +76,11 @@ _DEFAULT_WATCH_POLL_SEC = 60.0
 # How many consecutive offline reads confirm the stream really ended (rather
 # than a single transient blip) before the guard tears down and exits.
 _DEFAULT_OFFLINE_CONFIRM = 2
+# Scoped by uid: a bare name in a shared /tmp would collide between users, so one
+# user's stop could try to signal another's guard (and fail to write the pidfile).
 _DEFAULT_PIDFILE = os.path.join(
-    tempfile.gettempdir(), "streaming-ad-control-guard.pid"
+    tempfile.gettempdir(),
+    f"streaming-ad-control-guard-{getattr(os, 'getuid', lambda: 0)()}.pid",
 )
 
 
@@ -184,11 +187,25 @@ def _wait_for_live_stream(
 
 
 def _pid_alive(pid: int) -> bool:
+    """True when *pid* is a live process that still looks like one of our guards.
+
+    A bare ``kill(pid, 0)`` is not enough: pids get recycled, and a stale pidfile
+    could name a pid now owned by something completely unrelated — which we'd
+    then SIGTERM. Where ``/proc`` is available we also require the command line
+    to mention this script, so a recycled pid reads as dead instead.
+    """
     try:
         os.kill(pid, 0)
     except OSError:
         return False
-    return True
+    cmdline_path = f"/proc/{pid}/cmdline"
+    try:
+        with open(cmdline_path, "rb") as fh:
+            cmdline = fh.read().decode("utf-8", "replace")
+    except OSError:
+        # No /proc (non-Linux) or unreadable — fall back to the liveness check.
+        return True
+    return os.path.basename(__file__).replace(".pyc", ".py") in cmdline
 
 
 def _read_pidfile(pidfile: str) -> Optional[int]:
@@ -304,10 +321,34 @@ def _run_guard(monitor: StreamAdMonitor, channel: str, args: argparse.Namespace)
         )
         current_title = stream.get("title", "")
         offline_reads = 0
+        # Edge-triggered: remember the last state we *successfully* applied and
+        # only issue toggles when the desired state actually changes. Re-applying
+        # every poll would mean a PATCH per campaign per minute for the whole
+        # stream — hundreds of pointless writes to the ad networks. A failed
+        # apply leaves this unset, so the next poll retries it.
+        applied: Optional[tuple] = None
+
+        def sync(title: str, live: bool) -> None:
+            nonlocal applied
+            if applied == (title, live):
+                return
+            if _safe_apply(monitor, title, live):
+                applied = (title, live)
+
         while True:
-            _safe_apply(monitor, current_title, live=True)
+            sync(current_title, True)
             time.sleep(args.watch_poll)
-            stream = monitor.twitch.get_stream(channel)
+            try:
+                stream = monitor.twitch.get_stream(channel)
+            except Exception as exc:  # noqa: BLE001
+                # We couldn't reach Twitch, which is NOT the same as the stream
+                # having ended. Hold the current state and retry — tearing the
+                # campaign down here would punish a network blip, and dying here
+                # would strand it enabled (the very thing the guard prevents).
+                logger.warning(
+                    "Guard: Twitch lookup failed (%s); holding current state.", exc
+                )
+                continue
             if stream is None:
                 offline_reads += 1
                 logger.info(
@@ -422,11 +463,6 @@ def main(argv: Optional[list] = None) -> int:
             logger.error("Could not read env file %s: %s", args.env_file, exc)
             return 2
 
-    # Stopping always stops any running guard first, even if config below is
-    # broken — pausing ads must be maximally robust.
-    if args.event == "stopped":
-        _terminate_guard(args.pidfile)
-
     if args.watch and args.title is not None:
         logger.error(
             "--title can't be combined with --watch; --watch reads the live "
@@ -452,6 +488,11 @@ def main(argv: Optional[list] = None) -> int:
     try:
         if args.event == "stopped":
             logger.info("OBS stream stopped — pausing all campaigns.")
+            # Stop the guard first so it can't re-enable behind us, but only now
+            # that config loaded and we can actually follow through with the
+            # pause. Killing it earlier would mean a config error left nothing
+            # running to pause the campaign at all.
+            _terminate_guard(args.pidfile)
             monitor.apply(title="", live=False)
             return 0
 
@@ -493,12 +534,8 @@ def main(argv: Optional[list] = None) -> int:
         logger.error("Gate failed: %s", exc)
         return 1
     finally:
+        # Closes the ad-network clients and the title client we handed it.
         monitor.close()
-        if title_client is not None:
-            try:
-                title_client.close()
-            except Exception:
-                logger.debug("Title client close raised; ignoring.", exc_info=True)
 
 
 if __name__ == "__main__":

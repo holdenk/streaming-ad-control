@@ -22,6 +22,17 @@ import requests
 
 logger = logging.getLogger(__name__)
 
+
+class TwitchLookupError(RuntimeError):
+    """Raised when Twitch's live-state couldn't be determined at all.
+
+    Deliberately distinct from "the channel is offline" (``get_stream`` returning
+    ``None``). A network blip, a 5xx, or a malformed body means we *don't know*
+    the stream state — callers that would otherwise treat it as "offline" must
+    not tear a live campaign down over one failed request.
+    """
+
+
 _GQL_URL = "https://gql.twitch.tv/gql"
 # Public web client-id embedded in the Twitch site itself. Not account-specific,
 # not a secret — reading public stream metadata with it needs no login.
@@ -45,9 +56,12 @@ class TwitchPublicTitleClient:
     def get_stream(self, user_login: str) -> Optional[dict]:
         """Return a stream dict (with ``title``) if *user_login* is live, else None.
 
-        On any error — network failure, non-200, unexpected shape — this returns
-        ``None`` (treated as offline/unknown) so the caller's default-deny leaves
-        campaigns paused rather than acting on a bad read.
+        ``None`` means Twitch answered and the channel is **genuinely offline**
+        (or doesn't exist). Anything that leaves the state *unknown* — network
+        failure, non-200, malformed body — raises :class:`TwitchLookupError`
+        instead, so callers can tell "the stream ended" apart from "I couldn't
+        reach Twitch". Conflating the two would let one failed request tear down
+        a campaign mid-stream.
         """
         if not user_login:
             return None
@@ -59,20 +73,20 @@ class TwitchPublicTitleClient:
                 timeout=_REQUEST_TIMEOUT_SEC,
             )
         except requests.RequestException as exc:
-            logger.warning("Twitch GQL request failed: %r", exc)
-            return None
+            raise TwitchLookupError(f"Twitch GQL request failed: {exc!r}") from exc
         if not resp.ok:
-            logger.warning(
-                "Twitch GQL returned %d: %s", resp.status_code, resp.text[:200]
+            raise TwitchLookupError(
+                f"Twitch GQL returned {resp.status_code}: {resp.text[:200]}"
             )
-            return None
         try:
-            user = ((resp.json() or {}).get("data") or {}).get("user")
-        except ValueError:
-            logger.warning("Twitch GQL returned a non-JSON body.")
-            return None
+            body = resp.json() or {}
+        except ValueError as exc:
+            raise TwitchLookupError("Twitch GQL returned a non-JSON body.") from exc
+        if not isinstance(body, dict) or "data" not in body:
+            raise TwitchLookupError(f"Unexpected Twitch GQL payload: {str(body)[:200]}")
+        user = (body.get("data") or {}).get("user")
         if not user or user.get("stream") is None:
-            return None  # channel is offline
+            return None  # channel is offline (or unknown login)
         title = ((user.get("broadcastSettings") or {}).get("title")) or ""
         stream = dict(user["stream"])
         stream["title"] = title

@@ -196,18 +196,22 @@ class StreamAdMonitor:
             )
 
     def close(self) -> None:
-        """Release the ad-network clients (headless browser, HTTP sessions). Idempotent.
+        """Release the network clients (headless browser, HTTP sessions). Idempotent.
 
         The polling loop runs forever and never calls this, but one-shot callers
         such as the OBS gate should, so the headless Chromium is shut down
         promptly instead of lingering until process exit.
         """
-        for client in (self.reddit, self.trafficstars):
-            if client is not None:
-                try:
-                    client.close()
-                except Exception:
-                    logger.debug("Client close raised; ignoring.", exc_info=True)
+        for client in (self.reddit, self.trafficstars, self.twitch):
+            if client is None:
+                continue
+            closer = getattr(client, "close", None)
+            if closer is None:
+                continue  # an injected test double need not implement close()
+            try:
+                closer()
+            except Exception:
+                logger.debug("Client close raised; ignoring.", exc_info=True)
 
     # ------------------------------------------------------------------
     # Startup housekeeping

@@ -2,9 +2,13 @@
 
 from unittest.mock import MagicMock
 
+import pytest
 import requests
 
-from stream_ad_monitor.twitch_public_client import TwitchPublicTitleClient
+from stream_ad_monitor.twitch_public_client import (
+    TwitchLookupError,
+    TwitchPublicTitleClient,
+)
 
 
 def _resp(ok=True, status=200, payload=None):
@@ -58,21 +62,35 @@ def test_get_stream_returns_none_for_unknown_channel():
     assert client.get_stream("nope") is None
 
 
-def test_get_stream_returns_none_on_http_error():
+# An unreachable/broken Twitch means the state is UNKNOWN, which must be
+# distinguishable from "offline" — otherwise a blip looks like the stream ended
+# and tears a live campaign down.
+
+
+def test_get_stream_raises_on_http_error():
     client, _ = _client_with(_resp(ok=False, status=503, payload=None))
-    assert client.get_stream("streamer") is None
+    with pytest.raises(TwitchLookupError):
+        client.get_stream("streamer")
 
 
-def test_get_stream_returns_none_on_request_exception():
+def test_get_stream_raises_on_request_exception():
     client, _ = _client_with(exc=requests.RequestException("boom"))
-    assert client.get_stream("streamer") is None
+    with pytest.raises(TwitchLookupError):
+        client.get_stream("streamer")
 
 
-def test_get_stream_returns_none_on_non_json_body():
+def test_get_stream_raises_on_non_json_body():
     resp = _resp(payload=None)
     resp.json.side_effect = ValueError("not json")
     client, _ = _client_with(resp)
-    assert client.get_stream("streamer") is None
+    with pytest.raises(TwitchLookupError):
+        client.get_stream("streamer")
+
+
+def test_get_stream_raises_on_unexpected_payload():
+    client, _ = _client_with(_resp(payload={"errors": [{"message": "nope"}]}))
+    with pytest.raises(TwitchLookupError):
+        client.get_stream("streamer")
 
 
 def test_get_stream_returns_none_for_empty_login():

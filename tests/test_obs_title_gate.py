@@ -274,10 +274,10 @@ def test_guard_enables_then_pauses_when_stream_ends(tmp_path, monkeypatch):
     rc = gate._run_guard(monitor, "chan", args)
 
     assert rc == 0
-    # Enabled while live (twice, once per surviving poll), paused once at the end.
+    # Enabled once on go-live (edge-triggered), paused once at the end.
     enable_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is True]
     pause_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is False]
-    assert len(enable_calls) == 2
+    assert len(enable_calls) == 1
     assert all(c.args[0] == "Spark stream" for c in enable_calls)
     assert len(pause_calls) == 1
     assert not (tmp_path / "g.pid").exists()  # slot released on exit
@@ -294,6 +294,106 @@ def test_guard_pauses_and_exits_when_never_live(tmp_path, monkeypatch):
 
     assert rc == 0
     monitor.apply.assert_called_once_with("", live=False)  # default-deny, then exit
+
+
+def test_guard_survives_twitch_error_and_still_pauses_at_the_end(tmp_path, monkeypatch):
+    """A transient lookup failure must not kill the guard (that strands ads ACTIVE)."""
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    monitor.twitch.get_stream.side_effect = [
+        {"title": "Spark"},            # go-live
+        RuntimeError("503 Server Error"),  # blip — must be held, not fatal
+        RuntimeError("connection reset"),  # another blip
+        None,                          # offline 1/2
+        None,                          # offline 2/2 -> real end
+    ]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    pause_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is False]
+    assert len(pause_calls) == 1  # tore down exactly once, at the real end
+
+
+def test_guard_lookup_errors_do_not_count_as_offline(tmp_path, monkeypatch):
+    """Errors must not accumulate toward offline_confirm and cause a false teardown."""
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    monitor.twitch.get_stream.side_effect = [
+        {"title": "Spark"},                 # go-live
+        RuntimeError("blip"),               # would be 1/2 if errors counted
+        RuntimeError("blip"),               # would be 2/2 -> false teardown
+        RuntimeError("blip"),
+        {"title": "Spark"},                 # still live all along
+        None,
+        None,                               # only now a genuine end
+    ]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    pause_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is False]
+    assert len(pause_calls) == 1
+
+
+def test_guard_is_edge_triggered_not_reapplied_every_poll(tmp_path, monkeypatch):
+    """A long stream must not re-PATCH the ad networks on every single poll."""
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    live = {"title": "Spark"}
+    # Ten live polls with an unchanging title, then a confirmed end.
+    monitor.twitch.get_stream.side_effect = [live] * 10 + [None, None]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    enable_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is True]
+    assert len(enable_calls) == 1, "enable should be applied once, not once per poll"
+
+
+def test_guard_reapplies_when_title_changes(tmp_path, monkeypatch):
+    """Edge-triggering must still react when the title (and so the match) changes."""
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    monitor.twitch.get_stream.side_effect = [
+        {"title": "Spark stream"},
+        {"title": "Spark stream"},    # unchanged -> no re-apply
+        {"title": "Just chatting"},   # changed -> re-apply (rules re-evaluated)
+        None,
+        None,
+    ]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    applied_titles = [c.args[0] for c in monitor.apply.call_args_list if c.kwargs.get("live") is True]
+    assert applied_titles == ["Spark stream", "Just chatting"]
+
+
+def test_guard_retries_apply_after_failure(tmp_path, monkeypatch):
+    """A failed toggle must be retried on the next poll, not silently skipped."""
+    monkeypatch.setattr(gate.time, "sleep", lambda *_: None)
+    monkeypatch.setattr(gate, "_install_guard_signal_handler", lambda: None)
+    monitor = MagicMock()
+    live = {"title": "Spark"}
+    monitor.twitch.get_stream.side_effect = [live, live, live, None, None]
+    # First enable fails; the rest succeed.
+    monitor.apply.side_effect = [RuntimeError("reddit 500"), None, None, None]
+    args = _guard_args(tmp_path)
+
+    rc = gate._run_guard(monitor, "chan", args)
+
+    assert rc == 0
+    enable_calls = [c for c in monitor.apply.call_args_list if c.kwargs.get("live") is True]
+    assert len(enable_calls) >= 2, "a failed apply must be retried"
 
 
 def test_guard_single_read_blip_does_not_tear_down(tmp_path, monkeypatch):
@@ -333,6 +433,64 @@ def test_acquire_guard_slot_supersedes_previous(tmp_path, monkeypatch):
 
     assert (424242, gate.signal.SIGTERM) in killed
     assert pidfile.read_text().strip() == str(gate.os.getpid())
+
+
+def test_pid_alive_rejects_recycled_pid(monkeypatch):
+    """A live pid running something unrelated must not be treated as our guard."""
+    monkeypatch.setattr(gate.os, "kill", lambda pid, sig: None)  # pid is alive
+
+    import builtins
+
+    real_open = builtins.open
+
+    def fake_open(path, *a, **kw):
+        if str(path).startswith("/proc/"):
+            from io import BytesIO
+
+            return BytesIO(b"/usr/bin/postgres\x00-D\x00/var/lib/pg\x00")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert gate._pid_alive(4242) is False
+
+
+def test_pid_alive_accepts_our_guard(monkeypatch):
+    monkeypatch.setattr(gate.os, "kill", lambda pid, sig: None)
+
+    import builtins
+
+    real_open = builtins.open
+
+    def fake_open(path, *a, **kw):
+        if str(path).startswith("/proc/"):
+            from io import BytesIO
+
+            return BytesIO(b"/usr/bin/python\x00/opt/repo/scripts/obs_title_gate.py\x00started\x00")
+        return real_open(path, *a, **kw)
+
+    monkeypatch.setattr(builtins, "open", fake_open)
+    assert gate._pid_alive(4242) is True
+
+
+def test_default_pidfile_is_uid_scoped():
+    """A bare name in shared /tmp would collide between users on one machine."""
+    assert str(os.getuid()) in gate._DEFAULT_PIDFILE
+
+
+def test_stopped_does_not_kill_guard_when_config_fails(tmp_path, monkeypatch):
+    """If we can't pause, leave the guard alive — it's the only thing left that will."""
+    pidfile = tmp_path / "g.pid"
+    pidfile.write_text("424242")
+    killed = []
+    monkeypatch.setattr(gate, "_pid_alive", lambda pid: True)
+    monkeypatch.setattr(gate.os, "kill", lambda pid, sig: killed.append((pid, sig)))
+
+    with patch.object(gate, "Config", MagicMock(side_effect=ValueError("bad config"))):
+        rc = gate.main(["stopped", "--pidfile", str(pidfile)])
+
+    assert rc == 2
+    assert killed == [], "guard must survive when we can't follow through with a pause"
+    assert pidfile.exists()
 
 
 def test_release_guard_slot_only_removes_own(tmp_path):
