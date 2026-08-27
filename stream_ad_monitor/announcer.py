@@ -1,4 +1,4 @@
-"""Posts the stream links to X and Bluesky when the stream goes live.
+"""Posts the stream links to X, Bluesky, and Mastodon when the stream goes live.
 
 The awkward bit is that the two links don't become available at the same
 time. Twitch tells us the stream is live (and gives us its title) on the poll
@@ -44,6 +44,7 @@ from dataclasses import asdict, dataclass, field
 from typing import Dict, List, Optional
 
 from .bluesky_client import BlueskyClient
+from .mastodon_client import DEFAULT_INSTANCE_URL, MastodonClient
 from .twitter_client import TwitterClient
 from .youtube_client import YouTubeClient
 
@@ -100,6 +101,11 @@ class AnnounceSettings:
     bluesky_app_password: str = ""
     bluesky_pds_url: str = ""
 
+    mastodon_access_token: str = ""
+    mastodon_instance_url: str = ""
+    mastodon_visibility: str = ""
+    mastodon_max_chars: int = 0
+
     youtube_channel_handle: str = ""
     youtube_channel_id: str = ""
     youtube_live_url: str = ""
@@ -120,6 +126,11 @@ class AnnounceSettings:
         return bool(self.bluesky_handle and self.bluesky_app_password)
 
     @property
+    def mastodon_configured(self) -> bool:
+        # The instance URL has a default, so the token is the only requirement.
+        return bool(self.mastodon_access_token)
+
+    @property
     def youtube_configured(self) -> bool:
         return bool(
             self.youtube_channel_handle
@@ -129,7 +140,11 @@ class AnnounceSettings:
 
     @property
     def any_target_configured(self) -> bool:
-        return self.twitter_configured or self.bluesky_configured
+        return (
+            self.twitter_configured
+            or self.bluesky_configured
+            or self.mastodon_configured
+        )
 
 
 @dataclass
@@ -552,18 +567,19 @@ def build_announcer(
 ) -> Optional[StreamAnnouncer]:
     """Build a :class:`StreamAnnouncer`, or None when announcements are off.
 
-    Announcements are opt-in by configuration: with no X and no Bluesky
-    credentials there is nowhere to post, so this returns None and the
-    monitor runs exactly as it did before. A client that fails to construct
-    (bad credentials, missing optional dependency) is skipped rather than
-    taking the daemon down with it.
+    Announcements are opt-in by configuration: with no X, Bluesky, or
+    Mastodon credentials there is nowhere to post, so this returns None and
+    the monitor runs exactly as it did before. A client that fails to
+    construct (bad credentials, missing optional dependency) is skipped
+    rather than taking the daemon down with it.
     """
     if not settings.enabled:
         logger.info("Stream announcements disabled (ANNOUNCE_ENABLED=false).")
         return None
     if not settings.any_target_configured:
         logger.info(
-            "Stream announcements disabled: no X or Bluesky credentials configured."
+            "Stream announcements disabled: no X, Bluesky, or Mastodon "
+            "credentials configured."
         )
         return None
 
@@ -588,6 +604,18 @@ def build_announcer(
         except Exception:
             logger.exception(
                 "Could not set up the Bluesky client; skipping Bluesky posts."
+            )
+    if settings.mastodon_configured:
+        try:
+            targets["mastodon"] = MastodonClient(
+                settings.mastodon_access_token,
+                settings.mastodon_instance_url or DEFAULT_INSTANCE_URL,
+                visibility=settings.mastodon_visibility,
+                max_chars=settings.mastodon_max_chars,
+            )
+        except Exception:
+            logger.exception(
+                "Could not set up the Mastodon client; skipping Mastodon posts."
             )
     if not targets:
         logger.error(

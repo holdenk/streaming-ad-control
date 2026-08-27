@@ -42,7 +42,7 @@ class StreamAdMonitor:
     headless Chromium that the Reddit client needs.
 
     The same poll also feeds the optional :class:`StreamAnnouncer`, which
-    posts the stream links to X and Bluesky. Announcements are best-effort
+    posts the stream links to X, Bluesky, and Mastodon. Announcements are best-effort
     and never interfere with ad control.
     """
 

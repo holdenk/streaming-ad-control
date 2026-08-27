@@ -352,6 +352,7 @@ ANNOUNCE_ENV = {
     "TWITTER_ACCESS_TOKEN_SECRET": "tw_token_secret",
     "BLUESKY_HANDLE": "holden.bsky.social",
     "BLUESKY_APP_PASSWORD": "abcd-efgh-ijkl-mnop",
+    "MASTODON_ACCESS_TOKEN": "masto_token",
     "YOUTUBE_CHANNEL_HANDLE": "@holden",
 }
 
@@ -366,6 +367,7 @@ def test_announcements_are_off_without_credentials():
     assert announce.any_target_configured is False
     assert announce.twitter_configured is False
     assert announce.bluesky_configured is False
+    assert announce.mastodon_configured is False
     assert announce.youtube_configured is False
 
 
@@ -373,6 +375,7 @@ def test_announce_credentials_are_read_from_the_environment():
     announce = _config_with(**ANNOUNCE_ENV).announce
     assert announce.twitter_configured is True
     assert announce.bluesky_configured is True
+    assert announce.mastodon_configured is True
     assert announce.youtube_configured is True
     assert announce.bluesky_handle == "holden.bsky.social"
     assert announce.youtube_channel_handle == "@holden"
@@ -443,3 +446,23 @@ def test_announce_state_file_is_optional():
 
 def test_youtube_channel_id_alone_enables_lookup():
     assert _config_with(YOUTUBE_CHANNEL_ID="UC123").announce.youtube_configured is True
+
+
+def test_mastodon_token_alone_enables_announcing():
+    """The instance URL has a default, so the token is the only requirement."""
+    announce = _config_with(MASTODON_ACCESS_TOKEN="tok").announce
+    assert announce.mastodon_configured is True
+    assert announce.any_target_configured is True
+    assert announce.mastodon_instance_url == ""  # falls back to tech.lgbt
+
+
+def test_mastodon_instance_and_visibility_are_read():
+    announce = _config_with(
+        MASTODON_ACCESS_TOKEN="tok",
+        MASTODON_INSTANCE_URL="https://hachyderm.io",
+        MASTODON_VISIBILITY="unlisted",
+        MASTODON_MAX_CHARS="5000",
+    ).announce
+    assert announce.mastodon_instance_url == "https://hachyderm.io"
+    assert announce.mastodon_visibility == "unlisted"
+    assert announce.mastodon_max_chars == 5000

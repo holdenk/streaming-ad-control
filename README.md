@@ -1,7 +1,7 @@
 # streaming-ad-control
 
 Monitors a Twitch stream, toggles ad campaigns based on the stream title, and
-announces the stream on X and Bluesky when it goes live.
+announces the stream on X, Bluesky, and Mastodon when it goes live.
 
 Two ad networks are supported, each rule in `rules.yaml` can target either or
 both:
@@ -21,9 +21,10 @@ TrafficStars-only setup never launches Chromium and doesn't need Reddit
 credentials.
 
 Go-live announcements are a separate, optional feature on the same poll loop:
-set X and/or Bluesky credentials and the monitor posts the Twitch link when
-the stream starts, then threads the YouTube link underneath once the simulcast
-shows up. Leave those credentials unset and nothing changes.
+set credentials for X, Bluesky, and/or Mastodon and the monitor posts the
+Twitch link when the stream starts, then threads the YouTube link underneath
+once the simulcast shows up. Leave those credentials unset and nothing
+changes.
 
 ## Architecture (Reddit)
 
@@ -127,6 +128,8 @@ TWITTER_ACCESS_TOKEN_SECRET=...
 # Optional: announce the stream on Bluesky
 BLUESKY_HANDLE=you.bsky.social
 BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
+# Optional: announce the stream on Mastodon (instance defaults to tech.lgbt)
+MASTODON_ACCESS_TOKEN=...
 # Optional: follow up with the YouTube link once the simulcast is up
 YOUTUBE_CHANNEL_HANDLE=@yourhandle
 # Recommended when announcing: keeps a restart mid-stream from posting twice
@@ -190,8 +193,8 @@ mode).
 
 ## Announcing the stream
 
-Optional, and independent of the ad rules. Configure either platform, both,
-or neither.
+Optional, and independent of the ad rules. Configure any combination of the
+three platforms, or none.
 
 ### X (Twitter)
 
@@ -233,6 +236,31 @@ BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 Self-hosting a PDS? Point `BLUESKY_PDS_URL` at it (default
 `https://bsky.social`). Links are posted with rich-text facets so they're
 clickable — Bluesky does not auto-detect URLs in API posts.
+
+### Mastodon
+
+The simplest of the three: one access token, and it doesn't expire.
+
+1. On your instance, Preferences → Development → **New application**. The
+   `write:statuses` scope is all this needs — uncheck the rest.
+2. Copy **Your access token** from the application's page:
+
+```
+MASTODON_ACCESS_TOKEN=...
+```
+
+The instance defaults to `https://tech.lgbt`; set `MASTODON_INSTANCE_URL` for
+any other one. `MASTODON_VISIBILITY` takes `public` (default), `unlisted`,
+`private`, or `direct`.
+
+The post length limit is read from the instance on the first post rather than
+assumed — the stock limit is 500, but forks routinely raise it (tech.lgbt runs
+glitch-soc at 1024), so either constant would be wrong somewhere. Set
+`MASTODON_MAX_CHARS` to pin it and skip the lookup.
+
+Posts carry an idempotency key derived from their text, so a retry after a
+request that timed out *after* the post landed is collapsed by the server
+rather than double-posting.
 
 ### YouTube link
 
@@ -341,7 +369,7 @@ sudo systemctl enable --now streaming-ad-monitor
 - **Bluesky session rotation (~2h):** handled automatically. The access token
   is refreshed with the refresh token, and a failed refresh falls back to a
   fresh login from the app password, so uptime is unbounded. X's OAuth 1.0a
-  credentials are static and never rotate.
+  credentials and the Mastodon access token are static and never rotate.
 - **Set `ANNOUNCE_STATE_FILE` if you announce.** Announcement progress is
   otherwise in-memory only, so a restart mid-stream (`Restart=on-failure`
   does happen) re-announces the stream you're already on. The systemd unit's
@@ -351,6 +379,9 @@ sudo systemctl enable --now streaming-ad-monitor
   carrying the YouTube link — check the logs for "not broadcasting" on a
   stream you know is simulcast. `scripts/test_announce.py --dry-run` probes
   the lookup on its own.
-- **What a social outage costs you.** Nothing structural: posts are retried
-  on a bounded budget (5 announcement attempts, 3 follow-up attempts) and
-  then abandoned for that broadcast, and ad control is unaffected either way.
+- **What a social outage costs you.** Nothing structural: each platform
+  posts independently, so one being down doesn't stop the others; posts are
+  retried on a bounded budget (5 announcement attempts, 3 follow-up attempts)
+  and then abandoned for that broadcast; and ad control is unaffected either
+  way. A platform that missed the announcement is skipped for the YouTube
+  follow-up too, rather than being sent a context-free orphan post.

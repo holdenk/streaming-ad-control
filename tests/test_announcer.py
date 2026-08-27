@@ -25,7 +25,7 @@ YOUTUBE_URL = "https://www.youtube.com/watch?v=abc12345678"
 
 
 class FakeTarget:
-    """Stands in for the X / Bluesky clients."""
+    """Stands in for the X / Bluesky / Mastodon clients."""
 
     def __init__(self, name, fail=False):
         self.name = name
@@ -113,13 +113,29 @@ def test_announces_the_twitch_link_when_the_stream_goes_live(clock):
 
 
 def test_announces_to_every_configured_platform(clock):
-    targets = {"twitter": FakeTarget("twitter"), "bluesky": FakeTarget("bluesky")}
-    announcer, targets, _ = _make(targets=targets)
+    names = ["twitter", "bluesky", "mastodon"]
+    announcer, targets, _ = _make(targets={n: FakeTarget(n) for n in names})
 
     announcer.handle_stream(_stream())
 
-    assert len(targets["twitter"].posts) == 1
-    assert len(targets["bluesky"].posts) == 1
+    assert all(len(targets[name].posts) == 1 for name in names)
+
+
+def test_youtube_follow_up_reaches_every_platform(clock):
+    names = ["twitter", "bluesky", "mastodon"]
+    announcer, targets, _ = _make(
+        targets={n: FakeTarget(n) for n in names},
+        youtube_results=[None, LiveVideo("abc12345678")],
+    )
+
+    announcer.handle_stream(_stream())
+    clock.advance(60)
+    announcer.handle_stream(_stream())
+
+    for name in names:
+        text, reply_to = targets[name].posts[1]
+        assert YOUTUBE_URL in text
+        assert reply_to == {"id": f"{name}-1"}  # threaded on that platform's post
 
 
 def test_does_not_re_announce_on_later_polls(clock):
@@ -561,7 +577,40 @@ def test_build_announcer_builds_bluesky_only():
     assert announcer.twitch_url == TWITCH_URL
 
 
-def test_build_announcer_builds_both_platforms_and_youtube():
+def test_build_announcer_builds_mastodon_from_a_token_alone():
+    announcer = build_announcer("holden", AnnounceSettings(mastodon_access_token="t"))
+
+    assert sorted(announcer.targets) == ["mastodon"]
+    assert announcer.targets["mastodon"].instance_url == "https://tech.lgbt"
+
+
+def test_build_announcer_honours_a_custom_mastodon_instance():
+    settings = AnnounceSettings(
+        mastodon_access_token="t",
+        mastodon_instance_url="https://hachyderm.io",
+        mastodon_visibility="unlisted",
+    )
+    client = build_announcer("holden", settings).targets["mastodon"]
+
+    assert client.instance_url == "https://hachyderm.io"
+    assert client.visibility == "unlisted"
+
+
+def test_build_announcer_skips_mastodon_that_fails_to_construct():
+    settings = AnnounceSettings(
+        mastodon_access_token="t",
+        bluesky_handle="h.bsky.social",
+        bluesky_app_password="pw",
+    )
+    with patch(
+        "stream_ad_monitor.announcer.MastodonClient", side_effect=RuntimeError("boom")
+    ):
+        announcer = build_announcer("holden", settings)
+
+    assert sorted(announcer.targets) == ["bluesky"]
+
+
+def test_build_announcer_builds_every_platform_and_youtube():
     settings = AnnounceSettings(
         twitter_api_key="k",
         twitter_api_secret="s",
@@ -569,11 +618,12 @@ def test_build_announcer_builds_both_platforms_and_youtube():
         twitter_access_token_secret="ts",
         bluesky_handle="h.bsky.social",
         bluesky_app_password="pw",
+        mastodon_access_token="t",
         youtube_channel_handle="@holden",
     )
     announcer = build_announcer("holden", settings)
 
-    assert sorted(announcer.targets) == ["bluesky", "twitter"]
+    assert sorted(announcer.targets) == ["bluesky", "mastodon", "twitter"]
     assert announcer.youtube.live_url == "https://www.youtube.com/@holden/live"
 
 

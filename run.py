@@ -8,8 +8,9 @@ so subsequent runs reuse the session. 2FA is not supported.
 TrafficStars auth: plain REST — the account API key (from
 https://admin.trafficstars.com/profile/) is exchanged for a bearer token.
 
-Go-live announcements (optional): when X and/or Bluesky credentials are set,
-the same poll that toggles the ads also posts the stream link. The YouTube
+Go-live announcements (optional): when X, Bluesky, and/or Mastodon
+credentials are set, the same poll that toggles the ads also posts the
+stream link. The YouTube
 link only exists a little while after the broadcast starts, so it arrives as
 a threaded reply once the channel's /live page resolves to it.
 
@@ -32,6 +33,10 @@ Required to announce the stream on X (all four, from the app's
 
 Required to announce the stream on Bluesky:
   BLUESKY_HANDLE, BLUESKY_APP_PASSWORD
+
+Required to announce the stream on Mastodon (Preferences → Development →
+New application, scope write:statuses):
+  MASTODON_ACCESS_TOKEN
 
 Optional env vars:
   REDDIT_ADS_ACCOUNT_ID       Ads account id (from the dashboard URL:
@@ -63,6 +68,11 @@ Optional env vars:
   ANNOUNCE_STATE_FILE         Persist announcement state here so a restart
                               mid-stream doesn't post twice
   BLUESKY_PDS_URL             Non-default PDS (default https://bsky.social)
+  MASTODON_INSTANCE_URL       Mastodon instance (default https://tech.lgbt)
+  MASTODON_VISIBILITY         public, unlisted, private, direct
+                              (default public)
+  MASTODON_MAX_CHARS          Pin the instance's post limit (default: read
+                              it from the instance on first post)
   YOUTUBE_CHANNEL_HANDLE      @name — enables the YouTube follow-up
   YOUTUBE_CHANNEL_ID          UC… — alternative to the handle
   YOUTUBE_LIVE_URL            Explicit /live URL, if neither form fits

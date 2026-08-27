@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "stream-ad-monitor"
 version = "0.4.0"
-description = "Monitors a Twitch stream, toggles Reddit Ads and TrafficStars campaigns, and announces the stream on X and Bluesky."
+description = "Monitors a Twitch stream, toggles Reddit Ads and TrafficStars campaigns, and announces the stream on X, Bluesky, and Mastodon."
 authors = ["holden <holden@pigscanfly.ca>"]
 readme = "README.md"
 packages = [{ include = "stream_ad_monitor" }, { include = "run.py" }]

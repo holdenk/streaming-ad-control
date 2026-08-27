@@ -126,9 +126,10 @@ class Config:
       https://admin.trafficstars.com/profile/)
 
     Go-live announcements are independent of the rules and off until
-    credentials appear: set ``TWITTER_*`` and/or ``BLUESKY_*`` to post the
-    stream link, plus ``YOUTUBE_CHANNEL_HANDLE`` to follow up with the
-    simulcast link. See :class:`~stream_ad_monitor.announcer.AnnounceSettings`.
+    credentials appear: set ``TWITTER_*``, ``BLUESKY_*``, and/or
+    ``MASTODON_ACCESS_TOKEN`` to post the stream link, plus
+    ``YOUTUBE_CHANNEL_HANDLE`` to follow up with the simulcast link. See
+    :class:`~stream_ad_monitor.announcer.AnnounceSettings`.
     """
 
     def __init__(self) -> None:
@@ -184,7 +185,8 @@ class Config:
             _require("TRAFFICSTARS_API_KEY") if needs_trafficstars else ""
         )
 
-        # Go-live announcements (X / Bluesky). Entirely optional: with no
+        # Go-live announcements (X / Bluesky / Mastodon). Entirely optional:
+        # with no
         # credentials configured the monitor behaves exactly as before.
         self.announce: AnnounceSettings = self._load_announce_settings()
 
@@ -203,11 +205,12 @@ class Config:
             self.reddit_cookie_jar_path or "<not persisted>",
         )
         logger.info(
-            "Announcements: %s (x=%s, bluesky=%s, youtube_lookup=%s).",
+            "Announcements: %s (x=%s, bluesky=%s, mastodon=%s, youtube_lookup=%s).",
             "enabled" if self.announce.enabled and self.announce.any_target_configured
             else "disabled",
             "on" if self.announce.twitter_configured else "off",
             "on" if self.announce.bluesky_configured else "off",
+            "on" if self.announce.mastodon_configured else "off",
             "on" if self.announce.youtube_configured else "off",
         )
 
@@ -244,7 +247,7 @@ class Config:
         """Read the go-live announcement settings from the environment.
 
         Every value is optional. Announcements only run once at least one of
-        the X or Bluesky credential sets is complete, so an existing
+        the X, Bluesky, or Mastodon credential sets is complete, so an existing
         deployment picks up nothing new until it opts in.
         """
         return AnnounceSettings(
@@ -266,6 +269,10 @@ class Config:
             bluesky_handle=_optional("BLUESKY_HANDLE"),
             bluesky_app_password=_optional("BLUESKY_APP_PASSWORD"),
             bluesky_pds_url=_optional("BLUESKY_PDS_URL"),
+            mastodon_access_token=_optional("MASTODON_ACCESS_TOKEN"),
+            mastodon_instance_url=_optional("MASTODON_INSTANCE_URL"),
+            mastodon_visibility=_optional("MASTODON_VISIBILITY"),
+            mastodon_max_chars=_env_int("MASTODON_MAX_CHARS", 0),
             youtube_channel_handle=_optional("YOUTUBE_CHANNEL_HANDLE"),
             youtube_channel_id=_optional("YOUTUBE_CHANNEL_ID"),
             youtube_live_url=_optional("YOUTUBE_LIVE_URL"),

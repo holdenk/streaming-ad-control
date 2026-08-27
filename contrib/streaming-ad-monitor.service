@@ -1,7 +1,7 @@
 # /etc/systemd/system/streaming-ad-monitor.service
 #
 # Systemd unit for the Twitch → Reddit Ads / TrafficStars stream monitor,
-# which also announces the stream on X and Bluesky.
+# which also announces the stream on X, Bluesky, and Mastodon.
 # Tested on Ubuntu 25.04+ (systemd 257+).
 #
 # Installation:
@@ -53,14 +53,18 @@ Group=streaming-ad-monitor
 #   POLL_INTERVAL=60
 #   LOG_LEVEL=INFO               # DEBUG for verbose output (default INFO)
 #
-# Go-live announcements (all optional; posting is off until X or Bluesky
-# credentials appear).  Set both platforms or just one:
+# Go-live announcements (all optional; posting is off until X, Bluesky, or
+# Mastodon credentials appear).  Set any combination of the three:
 #   TWITTER_API_KEY=...
 #   TWITTER_API_SECRET=...
 #   TWITTER_ACCESS_TOKEN=...
 #   TWITTER_ACCESS_TOKEN_SECRET=...
 #   BLUESKY_HANDLE=you.bsky.social
 #   BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx   # an app password, not your login
+#   MASTODON_ACCESS_TOKEN=...                  # instance defaults to tech.lgbt
+#   # MASTODON_INSTANCE_URL=https://tech.lgbt  # set for any other instance
+#   # MASTODON_VISIBILITY=public               # or unlisted / private / direct
+#   # MASTODON_MAX_CHARS=1024                  # default: read from the instance
 #
 # The YouTube link shows up a few minutes after the broadcast starts and is
 # posted as a reply to the announcement.  Set the channel to enable it:
