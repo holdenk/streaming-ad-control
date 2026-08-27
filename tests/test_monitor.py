@@ -487,3 +487,86 @@ def test_no_trafficstars_client_constructed_for_reddit_only_config():
     )
 
     assert monitor.trafficstars is None
+
+
+# ---------------------------------------------------------------------------
+# Announcement wiring
+# ---------------------------------------------------------------------------
+
+
+def _make_monitor_with_announcer(stream_sequence):
+    cfg = _make_config()
+    twitch = MagicMock()
+    twitch.get_stream.side_effect = stream_sequence
+    reddit = MagicMock()
+    announcer = MagicMock()
+
+    monitor = StreamAdMonitor(
+        cfg,
+        twitch_client=twitch,
+        reddit_ad_client=reddit,
+        announcer=announcer,
+    )
+    return monitor, reddit, announcer
+
+
+def test_check_feeds_the_stream_to_the_announcer():
+    stream = _live("Spark stream")
+    monitor, _, announcer = _make_monitor_with_announcer([stream])
+    monitor.check()
+    announcer.handle_stream.assert_called_once_with(stream)
+
+
+def test_check_tells_the_announcer_when_the_stream_is_offline():
+    monitor, _, announcer = _make_monitor_with_announcer([None])
+    monitor.check()
+    announcer.handle_stream.assert_called_once_with(None)
+
+
+def test_announcement_failure_does_not_stop_ad_control():
+    """Posting is secondary — a broken social API must not strand the ads."""
+    monitor, reddit, announcer = _make_monitor_with_announcer([_live("Spark")])
+    announcer.handle_stream.side_effect = RuntimeError("X is down")
+
+    monitor.check()  # must not raise
+
+    reddit.enable_campaign.assert_called_once_with("camp_456")
+    assert monitor._rule_enabled[0] is True
+
+
+def test_no_announcer_is_built_without_credentials():
+    """An existing deployment picks up nothing new until it opts in."""
+    monitor, _, _ = _make_monitor([None])
+    assert monitor.announcer is None
+
+
+def test_check_works_without_an_announcer():
+    monitor, _, reddit = _make_monitor([_live("Spark")])
+    monitor.check()
+    reddit.enable_campaign.assert_called_once()
+
+
+def test_announcer_is_built_from_config_when_credentials_are_present():
+    cfg = _make_config()
+    cfg.announce.bluesky_handle = "holden.bsky.social"
+    cfg.announce.bluesky_app_password = "abcd-efgh-ijkl-mnop"
+
+    monitor = StreamAdMonitor(
+        cfg, twitch_client=MagicMock(), reddit_ad_client=MagicMock()
+    )
+
+    assert monitor.announcer is not None
+    assert sorted(monitor.announcer.targets) == ["bluesky"]
+    assert monitor.announcer.twitch_url == "https://twitch.tv/streamer"
+
+
+def test_ads_are_toggled_before_announcing():
+    """A slow social API must not delay the campaign toggles."""
+    monitor, reddit, announcer = _make_monitor_with_announcer([_live("Spark")])
+    order = []
+    reddit.enable_campaign.side_effect = lambda *a, **kw: order.append("enable")
+    announcer.handle_stream.side_effect = lambda *a, **kw: order.append("announce")
+
+    monitor.check()
+
+    assert order == ["enable", "announce"]

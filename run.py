@@ -8,6 +8,11 @@ so subsequent runs reuse the session. 2FA is not supported.
 TrafficStars auth: plain REST — the account API key (from
 https://admin.trafficstars.com/profile/) is exchanged for a bearer token.
 
+Go-live announcements (optional): when X and/or Bluesky credentials are set,
+the same poll that toggles the ads also posts the stream link. The YouTube
+link only exists a little while after the broadcast starts, so it arrives as
+a threaded reply once the channel's /live page resolves to it.
+
 Required env vars:
   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_CHANNEL_LOGIN
   RULES_FILE   — YAML rules file (recommended), OR legacy single-rule mode:
@@ -20,6 +25,14 @@ Required when any rule targets Reddit campaigns:
 Required when any rule targets TrafficStars campaigns:
   TRAFFICSTARS_API_KEY
 
+Required to announce the stream on X (all four, from the app's
+"Keys and tokens" tab; the app needs Read and write permission):
+  TWITTER_API_KEY, TWITTER_API_SECRET,
+  TWITTER_ACCESS_TOKEN, TWITTER_ACCESS_TOKEN_SECRET
+
+Required to announce the stream on Bluesky:
+  BLUESKY_HANDLE, BLUESKY_APP_PASSWORD
+
 Optional env vars:
   REDDIT_ADS_ACCOUNT_ID       Ads account id (from the dashboard URL:
                               ads.reddit.com/account/<id>/dashboard).
@@ -31,6 +44,31 @@ Optional env vars:
                               '{"data":{"configured_status":"ACTIVE"}}')
   POLL_INTERVAL               Seconds between Twitch polls (default 60)
   LOG_LEVEL                   DEBUG, INFO, WARNING, ERROR (default INFO)
+
+  Announcements:
+  ANNOUNCE_ENABLED            false to switch announcements off (default true)
+  ANNOUNCE_KEYWORDS           Comma-separated; only announce matching titles
+                              (default: announce every stream)
+  ANNOUNCE_TEMPLATE           Post body. Placeholders: {title} {channel}
+                              {twitch_url} {youtube_url} {links}. Use \\n for
+                              a line break (default
+                              '🔴 Live now: {title}\\n\\n{links}')
+  ANNOUNCE_YOUTUBE_TEMPLATE   Follow-up post body (default
+                              'Also streaming on YouTube: {youtube_url}')
+  ANNOUNCE_TITLE_MAX_CHARS    Trim long titles so the links fit (default 140)
+  ANNOUNCE_WAIT_FOR_YOUTUBE_SEC
+                              Hold the announcement this long so one post can
+                              carry both links (default 0 = post immediately
+                              and reply with YouTube later)
+  ANNOUNCE_STATE_FILE         Persist announcement state here so a restart
+                              mid-stream doesn't post twice
+  BLUESKY_PDS_URL             Non-default PDS (default https://bsky.social)
+  YOUTUBE_CHANNEL_HANDLE      @name — enables the YouTube follow-up
+  YOUTUBE_CHANNEL_ID          UC… — alternative to the handle
+  YOUTUBE_LIVE_URL            Explicit /live URL, if neither form fits
+  YOUTUBE_LOOKUP_INTERVAL     Seconds between YouTube checks (default 60)
+  YOUTUBE_LOOKUP_TIMEOUT      Give up on the YouTube link this long after
+                              going live (default 1800)
 
 Usage:
     python run.py

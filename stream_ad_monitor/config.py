@@ -5,6 +5,11 @@ import os
 from typing import List
 
 from . import mask_credential
+from .announcer import (
+    DEFAULT_TEMPLATE,
+    DEFAULT_YOUTUBE_TEMPLATE,
+    AnnounceSettings,
+)
 from .rules import Rule, load_rules_from_yaml
 
 logger = logging.getLogger(__name__)
@@ -29,6 +34,64 @@ def _require(name: str) -> str:
             name,
         )
     return sanitized
+
+
+def _optional(name: str, default: str = "") -> str:
+    """Return a sanitized optional env var, or *default* when unset/empty."""
+    return _sanitize(os.environ.get(name, "")) or default
+
+
+def _env_bool(name: str, default: bool) -> bool:
+    raw = _optional(name)
+    if not raw:
+        return default
+    if raw.lower() in ("1", "true", "yes", "on"):
+        return True
+    if raw.lower() in ("0", "false", "no", "off"):
+        return False
+    logger.warning(
+        "Environment variable '%s'=%r is not a boolean; using default %s.",
+        name,
+        raw,
+        default,
+    )
+    return default
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = _optional(name)
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        logger.warning(
+            "Environment variable '%s'=%r is not an integer; using default %d.",
+            name,
+            raw,
+            default,
+        )
+        return default
+
+
+def _env_list(name: str) -> List[str]:
+    """Split a comma-separated env var into a list of non-empty entries."""
+    return [part.strip() for part in _optional(name).split(",") if part.strip()]
+
+
+def _env_template(name: str, default: str) -> str:
+    """Read a message template, turning a literal ``\\n`` into a real newline.
+
+    Templates live in an env file (systemd ``EnvironmentFile=``), which has no
+    way to express a multi-line value, so ``\\n`` is spelled out there.
+    """
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = _sanitize(raw)
+    if not raw:
+        return default
+    return raw.replace("\\n", "\n")
 
 
 # Default body shapes for the campaign-state PATCH. Verified against
@@ -61,6 +124,11 @@ class Config:
       optional override.
     * TrafficStars: ``TRAFFICSTARS_API_KEY`` (generate on
       https://admin.trafficstars.com/profile/)
+
+    Go-live announcements are independent of the rules and off until
+    credentials appear: set ``TWITTER_*`` and/or ``BLUESKY_*`` to post the
+    stream link, plus ``YOUTUBE_CHANNEL_HANDLE`` to follow up with the
+    simulcast link. See :class:`~stream_ad_monitor.announcer.AnnounceSettings`.
     """
 
     def __init__(self) -> None:
@@ -116,6 +184,10 @@ class Config:
             _require("TRAFFICSTARS_API_KEY") if needs_trafficstars else ""
         )
 
+        # Go-live announcements (X / Bluesky). Entirely optional: with no
+        # credentials configured the monitor behaves exactly as before.
+        self.announce: AnnounceSettings = self._load_announce_settings()
+
         logger.info(
             "Config loaded: twitch_client_id=%s, reddit_user=%s, "
             "trafficstars_key=%s, channel=%s, poll_interval=%d, rules=%d, "
@@ -129,6 +201,14 @@ class Config:
             self.poll_interval,
             len(self.rules),
             self.reddit_cookie_jar_path or "<not persisted>",
+        )
+        logger.info(
+            "Announcements: %s (x=%s, bluesky=%s, youtube_lookup=%s).",
+            "enabled" if self.announce.enabled and self.announce.any_target_configured
+            else "disabled",
+            "on" if self.announce.twitter_configured else "off",
+            "on" if self.announce.bluesky_configured else "off",
+            "on" if self.announce.youtube_configured else "off",
         )
 
     @staticmethod
@@ -157,4 +237,36 @@ class Config:
                 if trafficstars_campaign_id
                 else []
             ),
+        )
+
+    @staticmethod
+    def _load_announce_settings() -> AnnounceSettings:
+        """Read the go-live announcement settings from the environment.
+
+        Every value is optional. Announcements only run once at least one of
+        the X or Bluesky credential sets is complete, so an existing
+        deployment picks up nothing new until it opts in.
+        """
+        return AnnounceSettings(
+            enabled=_env_bool("ANNOUNCE_ENABLED", True),
+            keywords=_env_list("ANNOUNCE_KEYWORDS"),
+            template=_env_template("ANNOUNCE_TEMPLATE", DEFAULT_TEMPLATE),
+            youtube_template=_env_template(
+                "ANNOUNCE_YOUTUBE_TEMPLATE", DEFAULT_YOUTUBE_TEMPLATE
+            ),
+            title_max_chars=_env_int("ANNOUNCE_TITLE_MAX_CHARS", 140),
+            wait_for_youtube_sec=_env_int("ANNOUNCE_WAIT_FOR_YOUTUBE_SEC", 0),
+            youtube_lookup_interval=_env_int("YOUTUBE_LOOKUP_INTERVAL", 60),
+            youtube_lookup_timeout=_env_int("YOUTUBE_LOOKUP_TIMEOUT", 1800),
+            state_path=_optional("ANNOUNCE_STATE_FILE"),
+            twitter_api_key=_optional("TWITTER_API_KEY"),
+            twitter_api_secret=_optional("TWITTER_API_SECRET"),
+            twitter_access_token=_optional("TWITTER_ACCESS_TOKEN"),
+            twitter_access_token_secret=_optional("TWITTER_ACCESS_TOKEN_SECRET"),
+            bluesky_handle=_optional("BLUESKY_HANDLE"),
+            bluesky_app_password=_optional("BLUESKY_APP_PASSWORD"),
+            bluesky_pds_url=_optional("BLUESKY_PDS_URL"),
+            youtube_channel_handle=_optional("YOUTUBE_CHANNEL_HANDLE"),
+            youtube_channel_id=_optional("YOUTUBE_CHANNEL_ID"),
+            youtube_live_url=_optional("YOUTUBE_LIVE_URL"),
         )

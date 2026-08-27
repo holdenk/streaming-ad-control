@@ -1,7 +1,7 @@
 [tool.poetry]
 name = "stream-ad-monitor"
-version = "0.3.0"
-description = "Monitors a Twitch stream and toggles Reddit Ads and TrafficStars campaigns."
+version = "0.4.0"
+description = "Monitors a Twitch stream, toggles Reddit Ads and TrafficStars campaigns, and announces the stream on X and Bluesky."
 authors = ["holden <holden@pigscanfly.ca>"]
 readme = "README.md"
 packages = [{ include = "stream_ad_monitor" }, { include = "run.py" }]
@@ -10,6 +10,8 @@ packages = [{ include = "stream_ad_monitor" }, { include = "run.py" }]
 python = "^3.10"
 PyYAML = ">=6.0.1"
 requests = ">=2.31.0"
+# OAuth 1.0a signing for the X (Twitter) announcement posts.
+requests-oauthlib = ">=1.3.1"
 selenium = ">=4.18.0"
 
 [tool.poetry.group.dev.dependencies]

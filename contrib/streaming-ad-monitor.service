@@ -1,6 +1,7 @@
 # /etc/systemd/system/streaming-ad-monitor.service
 #
-# Systemd unit for the Twitch → Reddit Ads / TrafficStars stream monitor.
+# Systemd unit for the Twitch → Reddit Ads / TrafficStars stream monitor,
+# which also announces the stream on X and Bluesky.
 # Tested on Ubuntu 25.04+ (systemd 257+).
 #
 # Installation:
@@ -15,7 +16,7 @@
 #   sudo journalctl -u streaming-ad-monitor -f
 
 [Unit]
-Description=Twitch stream → Reddit Ads / TrafficStars monitor
+Description=Twitch stream → Reddit Ads / TrafficStars monitor + go-live announcements
 Documentation=https://github.com/holdenk/streaming-ad-control
 After=network-online.target
 Wants=network-online.target
@@ -51,6 +52,28 @@ Group=streaming-ad-monitor
 #   TRIGGER_KEYWORD=Spark
 #   POLL_INTERVAL=60
 #   LOG_LEVEL=INFO               # DEBUG for verbose output (default INFO)
+#
+# Go-live announcements (all optional; posting is off until X or Bluesky
+# credentials appear).  Set both platforms or just one:
+#   TWITTER_API_KEY=...
+#   TWITTER_API_SECRET=...
+#   TWITTER_ACCESS_TOKEN=...
+#   TWITTER_ACCESS_TOKEN_SECRET=...
+#   BLUESKY_HANDLE=you.bsky.social
+#   BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx   # an app password, not your login
+#
+# The YouTube link shows up a few minutes after the broadcast starts and is
+# posted as a reply to the announcement.  Set the channel to enable it:
+#   YOUTUBE_CHANNEL_HANDLE=@yourhandle
+#
+# Announcement state lives here so a restart mid-stream doesn't post twice.
+# StateDirectory= (below) creates and owns this path:
+#   ANNOUNCE_STATE_FILE=/var/lib/streaming-ad-monitor/announce-state.json
+#
+# Other announcement knobs (see run.py for the full list):
+#   ANNOUNCE_KEYWORDS=Spark,home assistant   # default: announce every stream
+#   ANNOUNCE_TEMPLATE=🔴 Live now: {title}\n\n{links}
+#   ANNOUNCE_WAIT_FOR_YOUTUBE_SEC=0          # >0 to put both links in one post
 EnvironmentFile=/etc/streaming-ad-monitor/env
 
 # Path to the YAML rules file (see rules.example.yaml).
@@ -58,9 +81,10 @@ EnvironmentFile=/etc/streaming-ad-monitor/env
 Environment=RULES_FILE=/etc/streaming-ad-monitor/rules.yaml
 
 # Headless Chromium (used for Reddit) refuses to start without a writable
-# HOME/XDG profile directory, and the Reddit cookie jar needs a writable
-# path too.  StateDirectory= creates /var/lib/streaming-ad-monitor owned by
-# the service user and exempts it from ProtectSystem=strict.
+# HOME/XDG profile directory, and the Reddit cookie jar and the announcement
+# state file need writable paths too.  StateDirectory= creates
+# /var/lib/streaming-ad-monitor owned by the service user and exempts it from
+# ProtectSystem=strict.
 StateDirectory=streaming-ad-monitor
 Environment=HOME=/var/lib/streaming-ad-monitor
 Environment=XDG_CONFIG_HOME=/var/lib/streaming-ad-monitor/.config

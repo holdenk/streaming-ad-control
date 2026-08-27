@@ -6,6 +6,7 @@ import logging
 import time
 from typing import List, Optional, Tuple
 
+from .announcer import StreamAnnouncer, build_announcer
 from .config import Config
 from .reddit_ad_client import RedditAdClient
 from .rules import Rule
@@ -39,6 +40,10 @@ class StreamAdMonitor:
     Ad-network clients are only constructed for networks that at least one
     rule targets, so e.g. a TrafficStars-only setup never launches the
     headless Chromium that the Reddit client needs.
+
+    The same poll also feeds the optional :class:`StreamAnnouncer`, which
+    posts the stream links to X and Bluesky. Announcements are best-effort
+    and never interfere with ad control.
     """
 
     def __init__(
@@ -47,6 +52,7 @@ class StreamAdMonitor:
         twitch_client: Optional[TwitchClient] = None,
         reddit_ad_client: Optional[RedditAdClient] = None,
         trafficstars_client: Optional[TrafficStarsClient] = None,
+        announcer: Optional[StreamAnnouncer] = None,
     ) -> None:
         self.config = config
         self.twitch = twitch_client or TwitchClient(
@@ -73,6 +79,14 @@ class StreamAdMonitor:
         self.trafficstars = trafficstars_client
         if self.trafficstars is None and needs_trafficstars:
             self.trafficstars = TrafficStarsClient(config.trafficstars_api_key)
+
+        # Announcements are opt-in: build_announcer returns None unless X or
+        # Bluesky credentials are configured.
+        self.announcer = announcer
+        if self.announcer is None:
+            self.announcer = build_announcer(
+                config.twitch_channel_login, config.announce
+            )
 
         # Per-rule enabled flag; indexed in the same order as config.rules.
         self._rule_enabled: List[bool] = [False] * len(config.rules)
@@ -134,6 +148,27 @@ class StreamAdMonitor:
                     currently_enabled,
                     should_enable,
                 )
+
+        # Announce last: a social post or a YouTube lookup can each sit on a
+        # 30s timeout, and the campaign toggles shouldn't queue behind that on
+        # the poll that flips the stream live.
+        self._announce(stream)
+
+    def _announce(self, stream: Optional[dict]) -> None:
+        """Feed the poll result to the announcer, swallowing any failure.
+
+        Posting to a social platform is strictly secondary to keeping the ad
+        campaigns in the right state, so nothing that happens in here is
+        allowed to abort the poll cycle.
+        """
+        if self.announcer is None:
+            return
+        try:
+            self.announcer.handle_stream(stream)
+        except Exception:
+            logger.exception(
+                "Stream announcement failed; ad control is unaffected."
+            )
 
     # ------------------------------------------------------------------
     # Startup housekeeping

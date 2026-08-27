@@ -1,4 +1,5 @@
-"""stream_ad_monitor – monitors a Twitch stream and controls a Reddit ad."""
+"""stream_ad_monitor – watches a Twitch stream, toggles ad campaigns on
+Reddit Ads and TrafficStars, and announces the stream on X and Bluesky."""
 
 
 def mask_credential(value: str) -> str:
