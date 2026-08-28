@@ -239,7 +239,10 @@ BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 
 Self-hosting a PDS? Point `BLUESKY_PDS_URL` at it (default
 `https://bsky.social`). It must be `https://` — it carries your app password —
-except for `localhost`, where there is no network to sniff.
+except for `localhost`, where there is no network to sniff. Requests that
+carry credentials don't follow redirects either: a same-host `https`→`http`
+307 replays the request body, and on a login that body *is* the password.
+Point the URL straight at the API host.
 
 Links are posted with rich-text facets so they're clickable; Bluesky does not
 auto-detect URLs in API posts.

@@ -383,3 +383,19 @@ def test_the_two_phases_of_one_broadcast_do_not_collide():
 
     keys = [r.headers["Idempotency-Key"] for r in _post_requests()]
     assert keys[0] != keys[1]
+
+
+@resp_lib.activate
+def test_posting_refuses_a_redirect():
+    """A 307 would replay the request, bearer token included."""
+    resp_lib.add(
+        resp_lib.POST,
+        _STATUSES_URL,
+        status=307,
+        headers={"Location": "http://tech.lgbt/api/v1/statuses"},
+    )
+
+    with pytest.raises(RuntimeError, match="redirected"):
+        _client(max_chars=500).post("hello")
+
+    assert not [c for c in resp_lib.calls if c.request.url.startswith("http://")]

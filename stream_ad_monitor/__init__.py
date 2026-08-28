@@ -42,3 +42,22 @@ def require_secure_url(url: str, setting_name: str) -> str:
         f"{setting_name} must be an https:// URL (got {url!r}). It carries "
         "account credentials, so plain http:// is refused except for localhost."
     )
+
+
+def raise_on_redirect(response, what: str) -> None:
+    """Refuse a redirect on a request that carried credentials.
+
+    Redirects are disabled on those requests rather than followed, because a
+    same-host ``https``→``http`` 307 or 308 replays the request *body* — and
+    a Bluesky login carries its app password there, not in a header, so
+    requests' cross-host ``Authorization`` stripping does not help. A 3xx is
+    not an error status, so it has to be rejected explicitly or it would sail
+    past ``raise_for_status``.
+    """
+    if 300 <= response.status_code < 400:
+        location = response.headers.get("Location", "<none>")
+        raise RuntimeError(
+            f"{what} was redirected to {location!r}; the redirect was not "
+            "followed because this request carries credentials. Point the "
+            "configured URL straight at the API host."
+        )

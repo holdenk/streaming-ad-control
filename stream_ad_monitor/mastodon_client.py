@@ -26,7 +26,7 @@ from typing import Optional
 
 import requests
 
-from . import require_secure_url
+from . import raise_on_redirect, require_secure_url
 
 logger = logging.getLogger(__name__)
 
@@ -177,7 +177,9 @@ class MastodonClient:
                 "Idempotency-Key": _idempotency_key(dedupe_key or text, reply_id),
             },
             timeout=_REQUEST_TIMEOUT_SEC,
+            allow_redirects=False,
         )
+        raise_on_redirect(response, "Mastodon post")
         if not response.ok:
             logger.error(
                 "Mastodon post failed: status=%d, body=%s",

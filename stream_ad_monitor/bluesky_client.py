@@ -28,7 +28,7 @@ from typing import List, Optional
 
 import requests
 
-from . import require_secure_url
+from . import raise_on_redirect, require_secure_url
 
 logger = logging.getLogger(__name__)
 
@@ -123,7 +123,9 @@ class BlueskyClient:
             self._xrpc("com.atproto.server.createSession"),
             json={"identifier": self.handle, "password": self.app_password},
             timeout=_REQUEST_TIMEOUT_SEC,
+            allow_redirects=False,
         )
+        raise_on_redirect(response, "Bluesky login")
         if not response.ok:
             logger.error(
                 "Bluesky login failed: status=%d, body=%s",
@@ -149,7 +151,9 @@ class BlueskyClient:
             self._xrpc("com.atproto.server.refreshSession"),
             headers={"Authorization": f"Bearer {self._refresh_jwt}"},
             timeout=_REQUEST_TIMEOUT_SEC,
+            allow_redirects=False,
         )
+        raise_on_redirect(response, "Bluesky session refresh")
         if not response.ok:
             logger.info(
                 "Bluesky refresh failed (status=%d); falling back to full login.",
@@ -249,7 +253,7 @@ class BlueskyClient:
         return ref
 
     def _create_record(self, record: dict) -> requests.Response:
-        return self._session.post(
+        response = self._session.post(
             self._xrpc("com.atproto.repo.createRecord"),
             json={
                 "repo": self._did,
@@ -258,7 +262,10 @@ class BlueskyClient:
             },
             headers={"Authorization": f"Bearer {self._access_jwt}"},
             timeout=_REQUEST_TIMEOUT_SEC,
+            allow_redirects=False,
         )
+        raise_on_redirect(response, "Bluesky post")
+        return response
 
     def _permalink(self, uri: str) -> str:
         """Turn an ``at://did/app.bsky.feed.post/<rkey>`` URI into a web link."""

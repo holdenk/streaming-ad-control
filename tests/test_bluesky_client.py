@@ -300,3 +300,54 @@ def test_a_plain_http_pds_is_refused():
 def test_plain_http_is_allowed_for_a_loopback_pds():
     client = BlueskyClient("h.bsky.social", "pw", pds_url="http://localhost:2583")
     assert client.pds_url == "http://localhost:2583"
+
+
+# ---------------------------------------------------------------------------
+# Redirects on credential-bearing requests
+# ---------------------------------------------------------------------------
+
+
+@resp_lib.activate
+def test_login_refuses_an_https_to_http_downgrade_redirect():
+    """A 307 replays the body, and the login body *is* the app password.
+
+    requests only strips Authorization across hosts, and the password is not
+    in a header, so nothing else would stop it reaching a plaintext endpoint.
+    """
+    insecure = "http://bsky.social/xrpc/com.atproto.server.createSession"
+    resp_lib.add(
+        resp_lib.POST, _SESSION_URL, status=307, headers={"Location": insecure}
+    )
+
+    with pytest.raises(RuntimeError, match="redirected"):
+        _client().post("hello")
+
+    assert not [c for c in resp_lib.calls if c.request.url.startswith("http://")]
+
+
+@resp_lib.activate
+def test_the_app_password_never_reaches_a_plaintext_endpoint():
+    insecure = "http://bsky.social/xrpc/com.atproto.server.createSession"
+    resp_lib.add(
+        resp_lib.POST, _SESSION_URL, status=308, headers={"Location": insecure}
+    )
+
+    with pytest.raises(RuntimeError):
+        _client().post("hello")
+
+    bodies = [c.request.body or b"" for c in resp_lib.calls]
+    assert not any(b"app-pass" in (b if isinstance(b, bytes) else b.encode()) for b in bodies[1:])
+
+
+@resp_lib.activate
+def test_posting_refuses_a_redirect_too():
+    _add_session()
+    resp_lib.add(
+        resp_lib.POST,
+        _CREATE_URL,
+        status=307,
+        headers={"Location": "http://bsky.social/xrpc/com.atproto.repo.createRecord"},
+    )
+
+    with pytest.raises(RuntimeError, match="redirected"):
+        _client().post("hello")
