@@ -339,3 +339,130 @@ def test_legacy_both_campaign_ids_land_in_one_rule():
     assert len(cfg.rules) == 1
     assert cfg.rules[0].campaign_ids == ["2470329120103230906"]
     assert cfg.rules[0].trafficstars_campaign_ids == ["123456"]
+
+
+# ---------------------------------------------------------------------------
+# Announcement settings
+# ---------------------------------------------------------------------------
+
+ANNOUNCE_ENV = {
+    "TWITTER_API_KEY": "tw_key",
+    "TWITTER_API_SECRET": "tw_secret",
+    "TWITTER_ACCESS_TOKEN": "tw_token",
+    "TWITTER_ACCESS_TOKEN_SECRET": "tw_token_secret",
+    "BLUESKY_HANDLE": "holden.bsky.social",
+    "BLUESKY_APP_PASSWORD": "abcd-efgh-ijkl-mnop",
+    "MASTODON_ACCESS_TOKEN": "masto_token",
+    "YOUTUBE_CHANNEL_HANDLE": "@holden",
+}
+
+
+def _config_with(**extra_env):
+    with patch.dict(os.environ, {**LEGACY_ENV, **extra_env}, clear=True):
+        return Config()
+
+
+def test_announcements_are_off_without_credentials():
+    announce = _config_with().announce
+    assert announce.any_target_configured is False
+    assert announce.twitter_configured is False
+    assert announce.bluesky_configured is False
+    assert announce.mastodon_configured is False
+    assert announce.youtube_configured is False
+
+
+def test_announce_credentials_are_read_from_the_environment():
+    announce = _config_with(**ANNOUNCE_ENV).announce
+    assert announce.twitter_configured is True
+    assert announce.bluesky_configured is True
+    assert announce.mastodon_configured is True
+    assert announce.youtube_configured is True
+    assert announce.bluesky_handle == "holden.bsky.social"
+    assert announce.youtube_channel_handle == "@holden"
+
+
+def test_partial_twitter_credentials_do_not_enable_x():
+    """Three of the four keys is a misconfiguration, not a working setup."""
+    env = dict(ANNOUNCE_ENV)
+    del env["TWITTER_ACCESS_TOKEN_SECRET"]
+    assert _config_with(**env).announce.twitter_configured is False
+
+
+def test_announce_can_be_disabled_explicitly():
+    announce = _config_with(**ANNOUNCE_ENV, ANNOUNCE_ENABLED="false").announce
+    assert announce.enabled is False
+
+
+@pytest.mark.parametrize("raw, expected", [("true", True), ("0", False), ("YES", True)])
+def test_announce_enabled_accepts_common_boolean_spellings(raw, expected):
+    assert _config_with(ANNOUNCE_ENABLED=raw).announce.enabled is expected
+
+
+def test_unparseable_boolean_falls_back_to_the_default():
+    assert _config_with(ANNOUNCE_ENABLED="maybe").announce.enabled is True
+
+
+def test_announce_keywords_are_split_on_commas():
+    announce = _config_with(ANNOUNCE_KEYWORDS="Spark, home assistant ,,python").announce
+    assert announce.keywords == ["Spark", "home assistant", "python"]
+
+
+def test_announce_keywords_default_to_empty():
+    assert _config_with().announce.keywords == []
+
+
+def test_template_backslash_n_becomes_a_real_newline():
+    """An env file has no way to spell a literal newline."""
+    announce = _config_with(ANNOUNCE_TEMPLATE=r"live: {title}\n{links}").announce
+    assert announce.template == "live: {title}\n{links}"
+
+
+def test_empty_template_falls_back_to_the_default():
+    from stream_ad_monitor.announcer import DEFAULT_TEMPLATE
+
+    assert _config_with(ANNOUNCE_TEMPLATE="").announce.template == DEFAULT_TEMPLATE
+
+
+def test_lookup_timers_are_read_as_integers():
+    announce = _config_with(
+        YOUTUBE_LOOKUP_INTERVAL="30",
+        YOUTUBE_LOOKUP_TIMEOUT="600",
+        ANNOUNCE_WAIT_FOR_YOUTUBE_SEC="90",
+    ).announce
+    assert (announce.youtube_lookup_interval, announce.youtube_lookup_timeout) == (30, 600)
+    assert announce.wait_for_youtube_sec == 90
+
+
+def test_unparseable_integer_falls_back_to_the_default():
+    assert _config_with(YOUTUBE_LOOKUP_INTERVAL="soon").announce.youtube_lookup_interval == 60
+
+
+def test_announce_state_file_is_optional():
+    assert _config_with().announce.state_path == ""
+    assert _config_with(ANNOUNCE_STATE_FILE="/var/lib/x/state.json").announce.state_path == (
+        "/var/lib/x/state.json"
+    )
+
+
+def test_youtube_channel_id_alone_enables_lookup():
+    assert _config_with(YOUTUBE_CHANNEL_ID="UC123").announce.youtube_configured is True
+
+
+def test_mastodon_token_alone_enables_announcing():
+    """The instance URL has a default, so the token is the only requirement."""
+    announce = _config_with(MASTODON_ACCESS_TOKEN="tok").announce
+    assert announce.mastodon_configured is True
+    assert announce.any_target_configured is True
+    assert announce.mastodon_instance_url == ""  # falls back to tech.lgbt
+
+
+def test_mastodon_instance_and_visibility_are_read():
+    announce = _config_with(
+        MASTODON_ACCESS_TOKEN="tok",
+        MASTODON_INSTANCE_URL="https://hachyderm.io",
+        MASTODON_VISIBILITY="unlisted",
+        MASTODON_MAX_CHARS="5000",
+    ).announce
+    assert announce.mastodon_instance_url == "https://hachyderm.io"
+    assert announce.mastodon_visibility == "unlisted"
+    assert announce.mastodon_max_chars == 5000
