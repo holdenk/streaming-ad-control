@@ -19,6 +19,8 @@ from typing import Optional
 
 import requests
 
+from .text_limits import truncate_weighted, weighted_length
+
 logger = logging.getLogger(__name__)
 
 try:  # pragma: no cover - exercised only by the import-failure path
@@ -30,9 +32,9 @@ _TWEETS_URL = "https://api.twitter.com/2/tweets"
 _STATUS_URL = "https://x.com/i/web/status/{tweet_id}"
 
 _REQUEST_TIMEOUT_SEC = 30
-# X counts a bit more cleverly than this (URLs are always billed as 23
-# characters), so a plain character count is the conservative direction.
-_MAX_CHARS = 280
+# Weighted, not counted: see text_limits. A plain len() would wave through a
+# CJK or emoji-heavy post that X rejects.
+_MAX_WEIGHTED_CHARS = 280
 
 
 class TwitterClient:
@@ -102,6 +104,10 @@ class TwitterClient:
         Raises:
             requests.HTTPError: On any non-2xx response. Note that X rejects
                 a post whose text duplicates a recent one with a 403.
+            RuntimeError: If the response carries no tweet id. Without one
+                there is nothing to thread the YouTube follow-up onto, so
+                this counts as a failure rather than a post with an empty
+                permalink.
         """
         body: dict = {"text": self._truncate(text)}
         if reply_to and reply_to.get("id"):
@@ -118,22 +124,32 @@ class TwitterClient:
             )
         response.raise_for_status()
 
-        data = (response.json() or {}).get("data") or {}
-        tweet_id = str(data.get("id", ""))
+        try:
+            data = (response.json() or {}).get("data") or {}
+        except ValueError:
+            data = {}
+        tweet_id = str(data.get("id") or "")
+        if not tweet_id:
+            raise RuntimeError(
+                "X returned success but no tweet id "
+                f"(body: {response.text[:200]!r}); treating the post as "
+                "failed so it isn't threaded onto or reported as posted."
+            )
         ref = {"id": tweet_id, "url": _STATUS_URL.format(tweet_id=tweet_id)}
         logger.info("Posted to X: %s", ref["url"])
         return ref
 
     @staticmethod
     def _truncate(text: str) -> str:
-        if len(text) <= _MAX_CHARS:
+        weighted = weighted_length(text)
+        if weighted <= _MAX_WEIGHTED_CHARS:
             return text
         logger.warning(
-            "Announcement is %d characters; truncating to X's %d-character limit.",
-            len(text),
-            _MAX_CHARS,
+            "Announcement weighs %d of X's %d characters; truncating.",
+            weighted,
+            _MAX_WEIGHTED_CHARS,
         )
-        return text[: _MAX_CHARS - 1].rstrip() + "…"
+        return truncate_weighted(text, _MAX_WEIGHTED_CHARS)
 
     def close(self) -> None:
         """Tear down the HTTP session. Idempotent."""

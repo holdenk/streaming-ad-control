@@ -270,3 +270,22 @@ def test_bad_app_password_raises_on_login():
     )
     with pytest.raises(requests.HTTPError):
         _client().post("hello")
+
+
+@resp_lib.activate
+def test_success_without_a_strong_ref_is_an_error():
+    """Without uri+cid there is nothing to thread the follow-up onto."""
+    _add_session()
+    resp_lib.add(resp_lib.POST, _CREATE_URL, json={"uri": _POST_URI}, status=200)
+
+    with pytest.raises(RuntimeError, match="no uri/cid"):
+        _client().post("hello")
+
+
+@resp_lib.activate
+def test_success_with_a_non_json_body_is_an_error():
+    _add_session()
+    resp_lib.add(resp_lib.POST, _CREATE_URL, body="not json", status=200)
+
+    with pytest.raises(RuntimeError, match="no uri/cid"):
+        _client().post("hello")

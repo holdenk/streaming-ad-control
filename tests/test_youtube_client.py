@@ -20,17 +20,30 @@ _SIDEBAR = (
 )
 
 
-def _live_page(video_id="abc12345678", title="Spark stream", sidebar=_SIDEBAR):
-    """A channel that is broadcasting: /live renders the watch page."""
+def _live_page(
+    video_id="abc12345678", title="Spark stream", sidebar_id="zzz99999999"
+):
+    """A channel that is broadcasting: /live renders the watch page.
+
+    Modelled on the real thing, decoy ids included — the page is littered
+    with other videos' ids, and only currentVideoEndpoint names the one the
+    page is actually for.
+    """
     return (
         '<html><head><link rel="canonical" href="undefined">'
-        "</head><body><script>var ytInitialData = "
+        "</head><body><script>var ytInitialPlayerResponse = "
+        '{"playabilityStatus":{"status":"OK"}};'
+        "var ytInitialData = "
         '{"contents":{"twoColumnWatchNextResults":{"results":{"results":'
         '{"contents":[{"videoPrimaryInfoRenderer":{"title":{"runs":[{"text":'
-        f'"{title}"}}]}},"navigationEndpoint":{{"watchEndpoint":{{"videoId":'
-        f'"{video_id}"}}}},"viewCount":{{"videoViewCountRenderer":{{"viewCount":'
-        '{"runs":[{"text":"1,234"},{"text":" watching now"}]},"isLive":true}}}}]}}'
-        f",{sidebar}}}}}}};</script></body></html>"
+        f'"{title}"}}]}},"viewCount":{{"videoViewCountRenderer":{{"viewCount":'
+        '{"runs":[{"text":"1,234"},{"text":" watching now"}]},"isLive":true}}}}]}},'
+        '"secondaryResults":{"results":[{"compactVideoRenderer":{"videoId":'
+        f'"{sidebar_id}","title":{{"simpleText":"someone else\'s stream"}}}}}}]}}}}}},'
+        '"currentVideoEndpoint":{"clickTrackingParams":"CAEQ-B3KAQQcxFgg",'
+        '"commandMetadata":{"webCommandMetadata":{"url":"/watch?v='
+        f'{video_id}","webPageType":"WEB_PAGE_TYPE_WATCH"}}}},"watchEndpoint":'
+        f'{{"videoId":"{video_id}"}}}}}};</script></body></html>'
     )
 
 
@@ -49,24 +62,30 @@ def _offline_page():
 def _upcoming_page(video_id="sch12345678"):
     """A scheduled broadcast: a real watch page, but nobody is streaming yet."""
     return (
-        "<html><body><script>var ytInitialData = "
+        "<html><body><script>var ytInitialPlayerResponse = "
+        '{"playabilityStatus":{"status":"LIVE_STREAM_OFFLINE","isUpcoming":true},'
+        '"videoDetails":{"isLiveContent":true}};'
+        "var ytInitialData = "
         '{"contents":{"twoColumnWatchNextResults":{"results":{"results":'
         '{"contents":[{"videoPrimaryInfoRenderer":{"title":{"runs":[{"text":'
-        f'"Starting Sunday"}}]}},"navigationEndpoint":{{"watchEndpoint":'
-        f'{{"videoId":"{video_id}"}}}}}}]}}}}}}}},'
-        '"playabilityStatus":{"isUpcoming":true}};</script></body></html>'
+        '"Starting Sunday"}]}}}]}}}},'
+        f'"currentVideoEndpoint":{{"watchEndpoint":{{"videoId":"{video_id}"}}}}}};'
+        "</script></body></html>"
     )
 
 
 def _vod_page(video_id="vod12345678"):
     """A finished stream: watch page, plain view count, no live markers."""
     return (
-        "<html><body><script>var ytInitialData = "
+        "<html><body><script>var ytInitialPlayerResponse = "
+        '{"playabilityStatus":{"status":"OK"}};'
+        "var ytInitialData = "
         '{"contents":{"twoColumnWatchNextResults":{"results":{"results":'
         '{"contents":[{"videoPrimaryInfoRenderer":{"title":{"runs":[{"text":'
-        f'"Yesterday\'s stream"}}]}},"navigationEndpoint":{{"watchEndpoint":'
-        f'{{"videoId":"{video_id}"}}}},"viewCount":{{"videoViewCountRenderer":'
-        '{"viewCount":{"simpleText":"4,201 views"}}}}}]}}}}};</script></body></html>'
+        '"Yesterday\'s stream"}]}},"viewCount":{"videoViewCountRenderer":'
+        '{"viewCount":{"simpleText":"4,201 views"}}}}]}}}},'
+        f'"currentVideoEndpoint":{{"watchEndpoint":{{"videoId":"{video_id}"}}}}}};'
+        "</script></body></html>"
     )
 
 
@@ -119,11 +138,50 @@ def test_find_live_video_reads_the_primary_video_from_the_page():
 
 
 @resp_lib.activate
-def test_sidebar_videos_are_not_mistaken_for_the_broadcast():
-    """The watch page lists other channels' videos alongside this one."""
-    resp_lib.add(resp_lib.GET, _LIVE_URL, body=_live_page(), status=200)
+def test_the_broadcast_is_read_from_current_video_endpoint():
+    """Regression: a channel running two streams at once.
+
+    On youtube.com/@LofiGirl/live the first ``"videoId"`` after the primary
+    block belongs to the channel's *other* concurrent stream, so a positional
+    read announces the wrong one. Only currentVideoEndpoint names the video
+    the page is for.
+    """
+    page = _live_page(video_id="abc12345678", sidebar_id="otherstrm1")
+    # The decoy appears in the page body before currentVideoEndpoint does.
+    assert page.index("otherstrm1") < page.index("currentVideoEndpoint")
+    resp_lib.add(resp_lib.GET, _LIVE_URL, body=page, status=200)
+
     video = YouTubeClient("holden").find_live_video()
+
     assert video.video_id == "abc12345678"
+
+
+@resp_lib.activate
+def test_a_watch_page_without_current_video_endpoint_yields_nothing():
+    """No positional fallback: no link beats someone else's link."""
+    page = (
+        '{"contents":{"twoColumnWatchNextResults":{"contents":[{"videoId":'
+        '"zzz99999999"}]}},"videoViewCountRenderer":{"viewCount":{},'
+        '"isLive":true}}'
+    )
+    resp_lib.add(resp_lib.GET, _LIVE_URL, body=page, status=200)
+
+    assert YouTubeClient("holden").find_live_video() is None
+
+
+@resp_lib.activate
+def test_a_scheduled_sidebar_item_does_not_veto_a_live_broadcast():
+    """Sidebars routinely list other people's upcoming streams."""
+    page = _live_page().replace(
+        '"secondaryResults":{"results":[{"compactVideoRenderer":{',
+        '"secondaryResults":{"results":[{"compactVideoRenderer":{"isUpcoming":true,',
+    )
+    assert '"isUpcoming":true' in page
+    resp_lib.add(resp_lib.GET, _LIVE_URL, body=page, status=200)
+
+    video = YouTubeClient("holden").find_live_video()
+
+    assert video is not None and video.video_id == "abc12345678"
 
 
 @resp_lib.activate
@@ -150,10 +208,9 @@ def test_finished_stream_is_not_treated_as_live():
 def test_live_broadcast_details_alone_are_enough():
     """Not every live page carries a live view counter."""
     page = (
-        '<html><body>{"contents":{"twoColumnWatchNextResults":{"contents":'
-        '[{"videoPrimaryInfoRenderer":{}},{"videoId":"abc12345678"}]}},'
-        '"liveBroadcastDetails":{"isLiveNow":true,"startTimestamp":"2026-08-27"}}'
-        "</body></html>"
+        '<html><body>{"currentVideoEndpoint":{"watchEndpoint":{"videoId":'
+        '"abc12345678"}},"liveBroadcastDetails":{"isLiveNow":true,'
+        '"startTimestamp":"2026-08-27"}}</body></html>'
     )
     resp_lib.add(resp_lib.GET, _LIVE_URL, body=page, status=200)
 
@@ -187,7 +244,7 @@ def test_undefined_canonical_does_not_break_extraction():
 def test_a_real_canonical_link_is_preferred_when_present():
     page = (
         f'<link rel="canonical" href="{_WATCH_URL}">'
-        '{"twoColumnWatchNextResults":{"videoId":"zzz99999999"},'
+        '{"currentVideoEndpoint":{"watchEndpoint":{"videoId":"zzz99999999"}},'
         '"videoViewCountRenderer":{"viewCount":{},"isLive":true}}'
     )
     resp_lib.add(resp_lib.GET, _LIVE_URL, body=page, status=200)
@@ -210,7 +267,7 @@ def test_title_json_escapes_are_decoded():
 def test_missing_title_is_not_fatal():
     """The title is only used for logging; the link is what matters."""
     page = (
-        '{"contents":{"twoColumnWatchNextResults":{"videoId":"abc12345678"}},'
+        '{"currentVideoEndpoint":{"watchEndpoint":{"videoId":"abc12345678"}},'
         '"videoViewCountRenderer":{"viewCount":{},"isLive":true}}'
     )
     resp_lib.add(resp_lib.GET, _LIVE_URL, body=page, status=200)

@@ -72,7 +72,10 @@ def _run(announcer, args) -> int:
     # 1. YouTube lookup -------------------------------------------------
     youtube_url = ""
     if announcer.youtube is None:
-        print("YouTube: not configured (set YOUTUBE_CHANNEL_HANDLE to enable).")
+        print(
+            "YouTube: not configured (set YOUTUBE_CHANNEL_HANDLE, "
+            "YOUTUBE_CHANNEL_ID, or YOUTUBE_LIVE_URL to enable)."
+        )
     else:
         print(f"YouTube: checking {announcer.youtube.live_url}")
         try:
@@ -90,6 +93,14 @@ def _run(announcer, args) -> int:
             print(f"    live: {youtube_url} ({video.title})")
 
     # 2. Render ---------------------------------------------------------
+    if not youtube_url and announcer.settings.wait_for_youtube_sec:
+        print(
+            "\nNote: ANNOUNCE_WAIT_FOR_YOUTUBE_SEC="
+            f"{announcer.settings.wait_for_youtube_sec} — for a real stream the "
+            "daemon would hold this post that long for the YouTube link. This "
+            "check posts right away."
+        )
+
     text = announcer.render_announcement(args.title, youtube_url)
     print("\n--- announcement ---")
     print(text)

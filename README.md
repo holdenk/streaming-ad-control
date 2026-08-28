@@ -218,9 +218,11 @@ TWITTER_ACCESS_TOKEN=...
 TWITTER_ACCESS_TOKEN_SECRET=...
 ```
 
-The free tier allows 500 posts/month, which is ample for two posts per
-stream. X also rejects a post whose text duplicates a recent one with a 403 —
-worth knowing if you test with the same title repeatedly.
+Check the Developer Console for the write limits and pricing that apply to
+your app — they have changed more than once. Two posts per stream is a small
+ask of any of them. Separately, X rejects a post whose text duplicates a
+recent one with a 403, which is worth knowing if you test with the same title
+repeatedly.
 
 ### Bluesky
 
@@ -297,8 +299,13 @@ Placeholders: `{title}`, `{channel}`, `{twitch_url}`, `{youtube_url}`, and
 hold a real newline, so write `\n` for a line break:
 
 ```
-ANNOUNCE_TEMPLATE=🔴 Live now: {title}\n\n{links}
+ANNOUNCE_TEMPLATE="🔴 Live now: {title}\n\n{links}"
 ```
+
+Quote it. The verify step below sources this file with `set -a; source …`,
+and unquoted, the shell stops the assignment at the first space and tries to
+run `Live` as a command. The quotes also keep the `\n` literal for the daemon
+to expand.
 
 Other knobs: `ANNOUNCE_KEYWORDS` (comma-separated — only announce matching
 titles; default announces every stream), `ANNOUNCE_WAIT_FOR_YOUTUBE_SEC`

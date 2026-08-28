@@ -212,6 +212,19 @@ def test_title_edited_into_matching_mid_stream_is_announced(clock):
     assert len(targets["twitter"].posts) == 1
 
 
+def test_a_title_edit_does_not_strand_the_youtube_follow_up(clock):
+    """Announced streams finish their thread even if the title stops matching."""
+    announcer, targets, _ = _make(
+        keywords=["spark"], youtube_results=[None, LiveVideo("abc12345678")]
+    )
+
+    announcer.handle_stream(_stream(title="Spark internals"))
+    clock.advance(60)
+    announcer.handle_stream(_stream(title="just chatting now"))
+
+    assert YOUTUBE_URL in targets["twitter"].texts[1]
+
+
 def test_no_keywords_announces_every_stream(clock):
     announcer, targets, _ = _make()
     announcer.handle_stream(_stream(title="anything at all"))
@@ -378,8 +391,64 @@ def test_follow_up_only_goes_to_platforms_that_got_the_announcement(clock):
     clock.advance(60)
     announcer.handle_stream(_stream())
 
-    # X never got the announcement, so a reply there would be an orphan post.
-    assert len(targets["twitter"].posts) == 1
+    # X never got the announcement, so a reply there would be an orphan post:
+    # it is retried with the announcement instead.
+    assert all("Live now" in text for text in targets["twitter"].texts)
+    assert YOUTUBE_URL in targets["bluesky"].texts[1]
+
+
+def test_a_platform_that_missed_the_announcement_is_retried(clock):
+    """A 60-second outage must not cost that platform the whole stream."""
+    flaky = FakeTarget("twitter", fail=True)
+    announcer, targets, _ = _make(
+        targets={"twitter": flaky, "bluesky": FakeTarget("bluesky")}
+    )
+
+    announcer.handle_stream(_stream(title="Spark"))
+    assert flaky.posts and targets["bluesky"].posts  # bluesky landed, X didn't
+
+    flaky.fail = False  # the outage clears
+    clock.advance(60)
+    announcer.handle_stream(_stream(title="Spark"))
+
+    assert len(flaky.posts) == 2
+    assert "Live now: Spark" in flaky.texts[1]
+    # …and the platform that already had it is not posted to twice.
+    assert len(targets["bluesky"].posts) == 1
+
+
+def test_a_recovered_platform_gets_the_links_known_by_then(clock):
+    """It gets one complete post rather than an announcement plus a reply."""
+    flaky = FakeTarget("twitter", fail=True)
+    announcer, targets, _ = _make(
+        targets={"twitter": flaky, "bluesky": FakeTarget("bluesky")},
+        youtube_results=[None, LiveVideo("abc12345678")],
+    )
+
+    announcer.handle_stream(_stream(title="Spark"))
+    flaky.fail = False
+    clock.advance(60)
+    announcer.handle_stream(_stream(title="Spark"))
+
+    assert flaky.texts[1] == f"🔴 Live now: Spark\n\n{TWITCH_URL}\n{YOUTUBE_URL}"
+    assert len(flaky.posts) == 2  # no separate follow-up reply owed
+
+
+def test_a_recovered_platform_still_settles_the_stream(clock):
+    flaky = FakeTarget("twitter", fail=True)
+    announcer, targets, _ = _make(
+        targets={"twitter": flaky, "bluesky": FakeTarget("bluesky")},
+        youtube_results=[None, LiveVideo("abc12345678")],
+    )
+
+    announcer.handle_stream(_stream())
+    flaky.fail = False
+    for _ in range(4):
+        clock.advance(60)
+        announcer.handle_stream(_stream())
+
+    assert announcer._state.settled is True
+    assert len(flaky.posts) == 2
     assert len(targets["bluesky"].posts) == 2
 
 
@@ -453,7 +522,16 @@ def test_long_titles_are_truncated_so_the_links_survive(clock):
     announcer, targets, _ = _make(title_max_chars=20)
     announcer.handle_stream(_stream(title="x" * 100))
     text = targets["twitter"].texts[0]
-    assert "x" * 19 + "…" in text
+    assert "x" * 18 + "…" in text  # 18 + a 2-weight ellipsis = the 20 budget
+    assert TWITCH_URL in text
+
+
+def test_wide_titles_are_budgeted_by_weight_not_character_count(clock):
+    """20 CJK characters cost 40 by X's count, so half as many fit."""
+    announcer, targets, _ = _make(title_max_chars=20)
+    announcer.handle_stream(_stream(title="観" * 50))
+    text = targets["twitter"].texts[0]
+    assert "観" * 9 + "…" in text
     assert TWITCH_URL in text
 
 

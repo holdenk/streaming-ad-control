@@ -45,6 +45,7 @@ from typing import Dict, List, Optional
 
 from .bluesky_client import BlueskyClient
 from .mastodon_client import DEFAULT_INSTANCE_URL, MastodonClient
+from .text_limits import truncate_weighted
 from .twitter_client import TwitterClient
 from .youtube_client import YouTubeClient
 
@@ -152,6 +153,8 @@ class _StreamState:
     """Announcement progress for one Twitch broadcast."""
 
     stream_id: str
+    # True once the announcement step is finished: every target has it, or
+    # the retry budget ran out. Which targets actually have it is `refs`.
     announced: bool = False
     youtube_url: str = ""
     youtube_done: bool = False
@@ -242,11 +245,15 @@ class StreamAnnouncer:
             return _FALLBACK_TEMPLATE.format(**values).strip()
 
     def _truncate_title(self, title: str) -> str:
-        """Keep long titles from crowding the links out of the post."""
-        limit = self.settings.title_max_chars
-        if limit <= 0 or len(title) <= limit:
-            return title
-        return title[: limit - 1].rstrip() + "…"
+        """Keep long titles from crowding the links out of the post.
+
+        Measured the way X counts (see :mod:`text_limits`), so a title of
+        wide characters is budgeted at its real cost rather than its
+        character count. That's conservative for the other platforms, which
+        count graphemes, and it's what keeps a CJK title from pushing the
+        whole post past X's limit and getting it rejected.
+        """
+        return truncate_weighted(title, self.settings.title_max_chars)
 
     def render_announcement(self, title: str, youtube_url: str = "") -> str:
         """Public for the smoke-test script: the initial go-live post."""
@@ -296,7 +303,10 @@ class StreamAnnouncer:
         if state.settled:
             return
 
-        if not self._title_matches(title):
+        # Gate only the announcement itself. Once something has been posted,
+        # a mid-stream title edit must not strand the thread without its
+        # YouTube follow-up.
+        if not state.refs and not self._title_matches(title):
             logger.debug(
                 "Stream title '%s' does not match ANNOUNCE_KEYWORDS %s; not "
                 "announcing (will re-check in case the title changes).",
@@ -310,7 +320,7 @@ class StreamAnnouncer:
 
         if not state.announced:
             self._announce(state, title)
-        elif not state.youtube_done:
+        if state.youtube_pending and not state.youtube_done:
             self._youtube_followup(state, title)
 
     def _title_matches(self, title: str) -> bool:
@@ -324,7 +334,22 @@ class StreamAnnouncer:
     # ------------------------------------------------------------------
 
     def _announce(self, state: _StreamState, title: str) -> None:
-        youtube_url = "" if state.youtube_done else self._lookup_youtube(state)
+        """Post the announcement to every target that doesn't have it yet.
+
+        Tracked per target rather than as one all-or-nothing step: when one
+        platform is briefly down at go-live and another isn't, retrying only
+        the one that missed keeps a 60-second outage from silently costing
+        that platform its announcement for the whole stream — without
+        re-posting to the platform that already has it.
+        """
+        pending = [name for name in self.targets if name not in state.refs]
+        if not pending:
+            state.announced = True
+            return
+
+        youtube_url = state.youtube_url or (
+            "" if state.youtube_done else self._lookup_youtube(state)
+        )
 
         waited = time.monotonic() - (state.match_since or 0.0)
         if (
@@ -341,30 +366,46 @@ class StreamAnnouncer:
 
         text = self._render(self.settings.template, title, youtube_url)
         state.announce_attempts += 1
-        refs = self._post_to_all(text)
+        refs = self._post_to_all(text, pending)
+        state.refs.update(refs)
 
-        if not refs:
-            if state.announce_attempts >= _MAX_ANNOUNCE_ATTEMPTS:
+        if youtube_url:
+            state.youtube_url = youtube_url
+            # These targets got the link in the announcement itself, so they
+            # owe no follow-up; the step is done once nobody else is waiting.
+            if not state.youtube_pending:
+                state.youtube_done = True
+        else:
+            state.youtube_pending.extend(refs)
+
+        if refs:
+            logger.info(
+                "Announced stream %s on %s.",
+                state.stream_id,
+                ", ".join(sorted(refs)),
+            )
+
+        missing = [name for name in self.targets if name not in state.refs]
+        if not missing:
+            state.announced = True
+        elif state.announce_attempts >= _MAX_ANNOUNCE_ATTEMPTS:
+            state.announced = True
+            if state.refs:
+                logger.error(
+                    "Could not announce stream %s on %s after %d attempts; "
+                    "giving up on those platforms for this broadcast.",
+                    state.stream_id,
+                    ", ".join(sorted(missing)),
+                    state.announce_attempts,
+                )
+            else:
+                state.abandoned = True
                 logger.error(
                     "Announcement for stream %s failed on every platform %d "
                     "times; giving up on this broadcast.",
                     state.stream_id,
                     state.announce_attempts,
                 )
-                state.abandoned = True
-                self._save_state()
-            return
-
-        state.refs = refs
-        state.announced = True
-        if youtube_url:
-            state.youtube_url = youtube_url
-            state.youtube_done = True
-        else:
-            state.youtube_pending = list(refs)
-        logger.info(
-            "Announced stream %s on %s.", state.stream_id, ", ".join(sorted(refs))
-        )
         self._save_state()
 
     def _youtube_followup(self, state: _StreamState, title: str) -> None:
@@ -464,14 +505,17 @@ class StreamAnnouncer:
         state.youtube_failures = 0
         return video.url if video else ""
 
-    def _post_to_all(self, text: str) -> Dict[str, dict]:
-        """Post *text* everywhere; return refs for the targets that accepted it.
+    def _post_to_all(self, text: str, names: List[str]) -> Dict[str, dict]:
+        """Post *text* to *names*; return refs for the ones that accepted it.
 
         A platform that errors is simply absent from the result — the others
         still get their post, and the caller decides whether to retry.
         """
         refs: Dict[str, dict] = {}
-        for name, client in self.targets.items():
+        for name in names:
+            client = self.targets.get(name)
+            if client is None:
+                continue
             try:
                 refs[name] = client.post(text)
             except Exception:
@@ -639,8 +683,9 @@ def build_announcer(
             )
     else:
         logger.info(
-            "No YOUTUBE_CHANNEL_HANDLE configured; announcing the Twitch "
-            "link only."
+            "YouTube lookup off (set YOUTUBE_CHANNEL_HANDLE, "
+            "YOUTUBE_CHANNEL_ID, or YOUTUBE_LIVE_URL to enable it); "
+            "announcing the Twitch link only."
         )
 
     logger.info(

@@ -182,6 +182,10 @@ class BlueskyClient:
 
         Raises:
             requests.HTTPError: On any non-2xx response.
+            RuntimeError: If the response carries no uri/cid. That pair is
+                the strong ref a reply needs, so without it the YouTube
+                follow-up could not be threaded — better to fail here than
+                to report a post with an empty permalink.
         """
         self._ensure_session()
         text = self._truncate(text)
@@ -213,12 +217,18 @@ class BlueskyClient:
             )
         response.raise_for_status()
 
-        payload = response.json() or {}
-        ref = {
-            "uri": payload.get("uri", ""),
-            "cid": payload.get("cid", ""),
-            "url": self._permalink(payload.get("uri", "")),
-        }
+        try:
+            payload = response.json() or {}
+        except ValueError:
+            payload = {}
+        uri, cid = payload.get("uri", ""), payload.get("cid", "")
+        if not uri or not cid:
+            raise RuntimeError(
+                "Bluesky returned success but no uri/cid "
+                f"(body: {response.text[:200]!r}); treating the post as "
+                "failed so it isn't threaded onto or reported as posted."
+            )
+        ref = {"uri": uri, "cid": cid, "url": self._permalink(uri)}
         # Replies keep pointing at the thread root, not at themselves.
         if record.get("reply"):
             ref["root"] = record["reply"]["root"]

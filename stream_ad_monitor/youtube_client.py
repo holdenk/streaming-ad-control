@@ -15,17 +15,23 @@ Reading it takes some care, because that page is a JavaScript shell — the
 ``og:`` tags. Everything real is in the ``ytInitialData`` blob, so we match
 against it directly. Observed on live vs. offline channels:
 
-  * **Live** → the page is a *watch* page: it contains
-    ``twoColumnWatchNextResults``, the primary video's id is the first
-    ``"videoId"`` after that marker, and the primary view counter renders as
-    a live one (``"videoViewCountRenderer":{…,"isLive":true}`` — "N watching
-    now"). Anchoring on the primary renderer matters: a sidebar full of other
-    people's live videos would otherwise read as live.
+  * **Live** → the page is a *watch* page. The broadcast's id comes from
+    ``currentVideoEndpoint``, which is the only place that reliably names the
+    video the page is *for*. Position-based guesses do not work: on a channel
+    running several concurrent streams (LofiGirl, say) the first ``"videoId"``
+    after the primary block belongs to a *different* one of them, so a
+    positional read announces the wrong stream. Liveness is separate — the
+    primary view counter has to render as a live one
+    (``"videoViewCountRenderer":{…,"isLive":true}`` — "N watching now"),
+    which a sidebar full of other people's live videos does not affect.
   * **Offline** → the page is the *channel* page instead
-    (``twoColumnBrowseResultsRenderer``), with no watch-next block and no live
-    view counter, so the check falls through to None.
-  * **Scheduled** → a watch page with ``"isUpcoming":true``. Announcing that
-    link would send viewers to a countdown, so it vetoes the whole check.
+    (``twoColumnBrowseResultsRenderer``), with no ``currentVideoEndpoint`` and
+    no live view counter, so the check falls through to None.
+  * **Scheduled** → a watch page whose *player payload* says
+    ``"isUpcoming":true``. Announcing that link would send viewers to a
+    countdown, so it vetoes the check — but only when the marker belongs to
+    the primary video, since the sidebar routinely lists other people's
+    scheduled streams.
 
 Because this parses an HTML page rather than a versioned API, treat a lookup
 failure as "unknown for now" — the announcer does, and simply posts the Twitch
@@ -66,12 +72,17 @@ _BROWSER_HEADERS = {
 # Pre-answers the EU consent interstitial that would otherwise replace the page.
 _CONSENT_COOKIES = {"CONSENT": "YES+cb", "SOCS": "CAI"}
 
-# Marks the page as a watch page rather than the channel's browse page.
+# Marks the start of the watch-next results — everything past it (sidebar,
+# recommendations) is about *other* videos.
 _WATCH_PAGE_MARKER = "twoColumnWatchNextResults"
-# The block holding the primary video, as opposed to the sidebar.
-_PRIMARY_INFO_MARKER = "videoPrimaryInfoRenderer"
+# The primary video's player payload begins here.
+_PLAYABILITY_MARKER = '"playabilityStatus"'
 
-_VIDEO_ID_RE = re.compile(r'"videoId":"([\w-]{11})"')
+# The endpoint naming the video the page is for. Its videoId sits a few
+# hundred characters in, past clickTrackingParams and commandMetadata.
+_CURRENT_VIDEO_RE = re.compile(
+    r'"currentVideoEndpoint":.{0,600}?"videoId":"([\w-]{11})"', re.DOTALL
+)
 _CANONICAL_RE = re.compile(r'<link\s+rel="canonical"\s+href="([^"]+)"', re.IGNORECASE)
 
 # "N watching now" on the primary video — the most reliable liveness signal,
@@ -169,7 +180,7 @@ class YouTubeClient:
         response.raise_for_status()
 
         page = response.text
-        if _UPCOMING_MARKER in page:
+        if _is_upcoming(page):
             logger.debug(
                 "%s has a scheduled broadcast that hasn't started; waiting.",
                 self.live_url,
@@ -202,7 +213,13 @@ class YouTubeClient:
 
 
 def _extract_video_id(page: str, final_url: str) -> str:
-    """Find the id of the video the ``/live`` page resolved to ('' if none)."""
+    """Find the id of the video the ``/live`` page resolved to ('' if none).
+
+    Only sources that name the primary video outright are trusted. There is
+    deliberately no positional fallback: the ids scattered through the page
+    belong to whatever the sidebar is showing, and picking one of those means
+    announcing someone else's stream — worse than announcing no link at all.
+    """
     # Cheapest and most explicit: the request was redirected to the watch page.
     video_id = _video_id_from_url(final_url)
     if video_id:
@@ -217,14 +234,25 @@ def _extract_video_id(page: str, final_url: str) -> str:
         if video_id:
             return video_id
 
-    # Otherwise read it out of ytInitialData, anchored past the marker that
-    # distinguishes a watch page from the channel's browse page.
-    anchor = page.find(_WATCH_PAGE_MARKER)
-    if anchor == -1:
-        return ""
-    primary = page.find(_PRIMARY_INFO_MARKER, anchor)
-    match = _VIDEO_ID_RE.search(page, primary if primary != -1 else anchor)
+    match = _CURRENT_VIDEO_RE.search(page)
     return match.group(1) if match else ""
+
+
+def _is_upcoming(page: str) -> bool:
+    """True when the *primary* video is scheduled rather than broadcasting.
+
+    Scoped to the player payload: everything from ``playabilityStatus`` up to
+    the watch-next results describes the video the page is for, while the
+    sidebar past that point routinely lists other people's scheduled streams,
+    which must not veto a broadcast that is live right now.
+    """
+    start = page.find(_PLAYABILITY_MARKER)
+    if start == -1:
+        # No player payload to read; the positive live signal below is
+        # primary-scoped on its own, so there is nothing to veto.
+        return False
+    end = page.find(_WATCH_PAGE_MARKER, start)
+    return _UPCOMING_MARKER in page[start : end if end != -1 else len(page)]
 
 
 def _video_id_from_url(url: str) -> str:

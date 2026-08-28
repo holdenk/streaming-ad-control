@@ -76,7 +76,8 @@ Group=streaming-ad-monitor
 #
 # Other announcement knobs (see run.py for the full list):
 #   ANNOUNCE_KEYWORDS=Spark,home assistant   # default: announce every stream
-#   ANNOUNCE_TEMPLATE=🔴 Live now: {title}\n\n{links}
+#   ANNOUNCE_TEMPLATE="🔴 Live now: {title}\n\n{links}"   # quote it: the env
+#                                                       # file gets sourced too
 #   ANNOUNCE_WAIT_FOR_YOUTUBE_SEC=0          # >0 to put both links in one post
 EnvironmentFile=/etc/streaming-ad-monitor/env
 

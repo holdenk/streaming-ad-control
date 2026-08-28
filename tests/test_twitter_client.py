@@ -6,6 +6,7 @@ import pytest
 import requests
 import responses as resp_lib
 
+from stream_ad_monitor.text_limits import weighted_length
 from stream_ad_monitor.twitter_client import TwitterClient
 
 _TWEETS_URL = "https://api.twitter.com/2/tweets"
@@ -93,8 +94,65 @@ def test_post_truncates_over_the_character_limit():
     _client().post("x" * 400)
 
     text = json.loads(resp_lib.calls[0].request.body)["text"]
-    assert len(text) == 280
+    assert weighted_length(text) == 280
     assert text.endswith("…")
+
+
+@resp_lib.activate
+def test_wide_characters_are_weighted_like_x_weights_them():
+    """A 200-character CJK title is already 400 by X's count, not 200."""
+    resp_lib.add(resp_lib.POST, _TWEETS_URL, json=_tweet_response(), status=201)
+
+    _client().post("観" * 200)
+
+    text = json.loads(resp_lib.calls[0].request.body)["text"]
+    assert len(text) < 200  # a plain len() check would have let this through
+    assert weighted_length(text) <= 280
+
+
+@resp_lib.activate
+def test_urls_are_billed_at_their_t_co_length():
+    """A long URL costs 23, so a post full of them still fits."""
+    resp_lib.add(resp_lib.POST, _TWEETS_URL, json=_tweet_response(), status=201)
+    links = "\n".join(f"https://example.com/{'a' * 80}/{n}" for n in range(6))
+
+    _client().post(links)
+
+    assert json.loads(resp_lib.calls[0].request.body)["text"] == links
+
+
+@resp_lib.activate
+def test_truncation_does_not_cut_into_a_url():
+    """Half a link is worse than no link."""
+    resp_lib.add(resp_lib.POST, _TWEETS_URL, json=_tweet_response(), status=201)
+    url = "https://twitch.tv/holden"
+
+    _client().post("観" * 200 + " " + url)
+
+    text = json.loads(resp_lib.calls[0].request.body)["text"]
+    assert url not in text or text.endswith(url)
+
+
+# ---------------------------------------------------------------------------
+# Response handling
+# ---------------------------------------------------------------------------
+
+
+@resp_lib.activate
+def test_success_without_a_tweet_id_is_an_error():
+    """An empty id would silently break threading and log a bogus permalink."""
+    resp_lib.add(resp_lib.POST, _TWEETS_URL, json={"data": {}}, status=201)
+
+    with pytest.raises(RuntimeError, match="no tweet id"):
+        _client().post("hello")
+
+
+@resp_lib.activate
+def test_success_with_a_non_json_body_is_an_error():
+    resp_lib.add(resp_lib.POST, _TWEETS_URL, body="not json", status=201)
+
+    with pytest.raises(RuntimeError, match="no tweet id"):
+        _client().post("hello")
 
 
 @resp_lib.activate
