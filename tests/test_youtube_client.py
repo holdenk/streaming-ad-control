@@ -9,7 +9,11 @@ instead of the usual meta tags.
 import pytest
 import responses as resp_lib
 
-from stream_ad_monitor.youtube_client import LiveVideo, YouTubeClient
+from stream_ad_monitor.youtube_client import (
+    LiveVideo,
+    YouTubeClient,
+    _video_id_from_url,
+)
 
 _LIVE_URL = "https://www.youtube.com/@holden/live"
 _WATCH_URL = "https://www.youtube.com/watch?v=abc12345678"
@@ -296,4 +300,49 @@ def test_find_live_video_raises_on_http_error():
 def test_unrecognised_page_shape_returns_none_rather_than_a_wrong_link():
     """If YouTube reshapes the page, a missing follow-up beats a bad link."""
     resp_lib.add(resp_lib.GET, _LIVE_URL, body="<html>nothing useful</html>", status=200)
+    assert YouTubeClient("holden").find_live_video() is None
+
+
+# ---------------------------------------------------------------------------
+# Video-id validation
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "url, expected",
+    [
+        ("https://www.youtube.com/watch?v=abc12345678", "abc12345678"),
+        ("https://youtu.be/abc12345678", "abc12345678"),
+        ("https://youtu.be/AbC-123_xyZ", "AbC-123_xyZ"),
+        # Not ids: too short, too long, nested paths, traversal, junk.
+        ("https://youtu.be/short", ""),
+        ("https://youtu.be/playlist/nested", ""),
+        ("https://www.youtube.com/watch?v=way-too-long-to-be-an-id", ""),
+        ("https://www.youtube.com/watch?v=../../evil", ""),
+        ("https://www.youtube.com/watch", ""),
+        ("https://www.youtube.com/@holden", ""),
+        ("", ""),
+    ],
+)
+def test_only_real_video_ids_are_accepted_from_a_url(url, expected):
+    """These URLs come from a redirect or canonical link — both YouTube's to
+    change — and an unvalidated value lands straight in an announced link."""
+    assert _video_id_from_url(url) == expected
+
+
+@resp_lib.activate
+def test_a_redirect_to_a_non_video_url_yields_nothing():
+    resp_lib.add(
+        resp_lib.GET,
+        _LIVE_URL,
+        status=302,
+        headers={"Location": "https://www.youtube.com/watch?v=not-an-id"},
+    )
+    resp_lib.add(
+        resp_lib.GET,
+        "https://www.youtube.com/watch?v=not-an-id",
+        body="<html></html>",
+        status=200,
+    )
+
     assert YouTubeClient("holden").find_live_video() is None

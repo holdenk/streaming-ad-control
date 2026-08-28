@@ -78,10 +78,16 @@ _WATCH_PAGE_MARKER = "twoColumnWatchNextResults"
 # The primary video's player payload begins here.
 _PLAYABILITY_MARKER = '"playabilityStatus"'
 
+# A YouTube video id is exactly 11 characters of this alphabet. Spelled out
+# rather than using \w, which is Unicode-aware in Python 3 and would accept
+# letters no id ever contains.
+_VIDEO_ID_CHARS = "[A-Za-z0-9_-]{11}"
+_VIDEO_ID_RE = re.compile(f"^{_VIDEO_ID_CHARS}$")
+
 # The endpoint naming the video the page is for. Its videoId sits a few
 # hundred characters in, past clickTrackingParams and commandMetadata.
 _CURRENT_VIDEO_RE = re.compile(
-    r'"currentVideoEndpoint":.{0,600}?"videoId":"([\w-]{11})"', re.DOTALL
+    f'"currentVideoEndpoint":.{{0,600}}?"videoId":"({_VIDEO_ID_CHARS})"', re.DOTALL
 )
 _CANONICAL_RE = re.compile(r'<link\s+rel="canonical"\s+href="([^"]+)"', re.IGNORECASE)
 
@@ -257,15 +263,27 @@ def _is_upcoming(page: str) -> bool:
 
 
 def _video_id_from_url(url: str) -> str:
-    """Pull the video id out of a watch/youtu.be URL ('' if it isn't one)."""
+    """Pull the video id out of a watch/youtu.be URL ('' if it isn't one).
+
+    Whatever comes back is checked against the real id shape before being
+    used. These URLs arrive from a redirect target or a canonical link — both
+    YouTube's to change — and an unvalidated value would be formatted
+    straight into an announced watch URL. A missing link beats a broken one.
+    """
     if not url:
         return ""
     parsed = urlparse(url)
     if parsed.path == "/watch":
-        return parse_qs(parsed.query).get("v", [""])[0]
-    if parsed.netloc.endswith("youtu.be"):
-        return parsed.path.lstrip("/")
-    return ""
+        candidate = parse_qs(parsed.query).get("v", [""])[0]
+    elif parsed.netloc.endswith("youtu.be"):
+        candidate = parsed.path.lstrip("/")
+    else:
+        return ""
+    if not _VIDEO_ID_RE.match(candidate):
+        if candidate:
+            logger.debug("Ignoring %r from %s: not a video id.", candidate, url)
+        return ""
+    return candidate
 
 
 def _extract_title(page: str) -> str:
