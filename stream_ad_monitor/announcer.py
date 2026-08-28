@@ -113,6 +113,7 @@ class AnnounceSettings:
 
     @property
     def twitter_configured(self) -> bool:
+        """True when all four X credentials are present."""
         return all(
             (
                 self.twitter_api_key,
@@ -124,15 +125,20 @@ class AnnounceSettings:
 
     @property
     def bluesky_configured(self) -> bool:
+        """True when a Bluesky handle and app password are both set."""
         return bool(self.bluesky_handle and self.bluesky_app_password)
 
     @property
     def mastodon_configured(self) -> bool:
-        # The instance URL has a default, so the token is the only requirement.
+        """True when a Mastodon token is set.
+
+        The instance URL has a default, so the token is the only requirement.
+        """
         return bool(self.mastodon_access_token)
 
     @property
     def youtube_configured(self) -> bool:
+        """True when the channel to watch for a simulcast is identified."""
         return bool(
             self.youtube_channel_handle
             or self.youtube_channel_id
@@ -141,6 +147,7 @@ class AnnounceSettings:
 
     @property
     def any_target_configured(self) -> bool:
+        """True when there is at least one platform to announce on."""
         return (
             self.twitter_configured
             or self.bluesky_configured

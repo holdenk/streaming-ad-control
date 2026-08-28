@@ -79,6 +79,7 @@ class MastodonClient:
 
     @property
     def statuses_url(self) -> str:
+        """The instance's status-posting endpoint."""
         return f"{self.instance_url}/api/v1/statuses"
 
     # ------------------------------------------------------------------

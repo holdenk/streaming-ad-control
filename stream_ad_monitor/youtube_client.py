@@ -115,6 +115,7 @@ class LiveVideo:
 
     @property
     def url(self) -> str:
+        """The public watch URL for this broadcast."""
         return _WATCH_URL.format(video_id=self.video_id)
 
 
