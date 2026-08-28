@@ -86,3 +86,14 @@ def test_a_zero_limit_yields_nothing():
 def test_a_negative_limit_is_rejected():
     with pytest.raises(ValueError, match="non-negative"):
         truncate_weighted("hello", -1)
+
+
+@pytest.mark.parametrize("limit", [0, 1, 2, 3, 10])
+def test_output_never_exceeds_the_limit(limit):
+    """Including limits too small to fit the ellipsis itself."""
+    assert weighted_length(truncate_weighted("hello world", limit)) <= limit
+
+
+def test_a_limit_below_the_ellipsis_weight_yields_nothing():
+    """The ellipsis weighs 2; emitting it at limit=1 would break the contract."""
+    assert truncate_weighted("hello", 1) == ""

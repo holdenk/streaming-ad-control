@@ -28,7 +28,7 @@ from typing import List, Optional
 
 import requests
 
-from . import raise_on_redirect, require_secure_url
+from . import guard_loopback_session, raise_on_redirect, require_secure_url
 
 logger = logging.getLogger(__name__)
 
@@ -103,6 +103,7 @@ class BlueskyClient:
             (pds_url or _DEFAULT_PDS_URL).rstrip("/"), "BLUESKY_PDS_URL"
         )
         self._session = session or requests.Session()
+        guard_loopback_session(self._session, self.pds_url)
         self._access_jwt: Optional[str] = None
         self._refresh_jwt: Optional[str] = None
         self._did: Optional[str] = None

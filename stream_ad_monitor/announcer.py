@@ -64,6 +64,23 @@ _MAX_FOLLOWUP_ATTEMPTS = 3
 # Consecutive YouTube API errors before we stop spending quota on this stream.
 _MAX_YOUTUBE_FAILURES = 3
 
+# Persisted field -> the type it must have on the way back in. Dataclasses
+# don't enforce annotations, and a wrong type here is not a crash-and-move-on:
+# a `refs` that came back as a list makes _announce raise *after* it has
+# already posted, so the progress is never saved and the next poll posts
+# again — for the whole broadcast.
+_PERSISTED_TYPES = {
+    "stream_id": str,
+    "announced": bool,
+    "youtube_url": str,
+    "youtube_done": bool,
+    "youtube_pending": list,
+    "refs": dict,
+    "abandoned": bool,
+    "announce_attempts": int,
+    "followup_attempts": int,
+}
+
 # Fields of _StreamState that survive a restart. The rest are timers that are
 # only meaningful within one process.
 _PERSISTED_FIELDS = (
@@ -568,6 +585,13 @@ class StreamAnnouncer:
         if not isinstance(raw, dict) or not raw.get("stream_id"):
             return None
         known = {k: v for k, v in raw.items() if k in _PERSISTED_FIELDS}
+        if not _persisted_shape_is_valid(known):
+            logger.warning(
+                "Announcement state in %s has unexpected field types; "
+                "ignoring it and starting fresh.",
+                path,
+            )
+            return None
         try:
             state = _StreamState(**known)
         except TypeError:
@@ -621,6 +645,22 @@ class StreamAnnouncer:
                 close()
             except Exception:
                 logger.debug("Client close raised; ignoring.", exc_info=True)
+
+
+def _persisted_shape_is_valid(known: Dict[str, object]) -> bool:
+    """True when every restored field has the type the state machine expects."""
+    for key, value in known.items():
+        expected = _PERSISTED_TYPES[key]
+        # bool is a subclass of int, so an int field would accept True.
+        if expected is int and isinstance(value, bool):
+            return False
+        if not isinstance(value, expected):
+            return False
+    pending = known.get("youtube_pending", [])
+    if any(not isinstance(name, str) for name in pending):
+        return False
+    refs = known.get("refs", {})
+    return all(isinstance(ref, dict) for ref in refs.values())
 
 
 # ----------------------------------------------------------------------

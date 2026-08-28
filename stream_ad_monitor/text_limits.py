@@ -72,6 +72,10 @@ def truncate_weighted(text: str, limit: int) -> str:
         return ""
     if weighted_length(text) <= limit:
         return text
+    if limit < weighted_length(_ELLIPSIS):
+        # No room for even the ellipsis, and emitting it anyway would exceed
+        # the limit this function promises to respect.
+        return ""
 
     budget = limit - weighted_length(_ELLIPSIS)
     kept: list = []

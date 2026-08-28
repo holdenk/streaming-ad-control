@@ -764,3 +764,64 @@ def test_a_retried_announcement_keeps_the_same_dedupe_key(clock):
     announcer.handle_stream(_stream(stream_id="7"))
 
     assert targets["twitter"].dedupe_keys == ["7:announce", "7:announce"]
+
+
+# ---------------------------------------------------------------------------
+# Persisted-state validation
+# ---------------------------------------------------------------------------
+
+
+def _write_state(path, **fields):
+    payload = {"stream_id": "42", "announced": False, "refs": {}, "youtube_pending": []}
+    payload.update(fields)
+    path.write_text(json.dumps(payload))
+
+
+@pytest.mark.parametrize(
+    "field, bad_value",
+    [
+        ("refs", []),  # a list, so refs.update() would raise after posting
+        ("refs", {"twitter": "not-a-ref"}),
+        ("youtube_pending", {}),
+        ("youtube_pending", [1, 2]),
+        ("announced", "yes"),
+        ("announce_attempts", True),  # bool is a subclass of int
+        ("announce_attempts", "3"),
+        ("youtube_url", 7),
+    ],
+)
+def test_state_with_wrong_field_types_is_discarded(clock, tmp_path, field, bad_value):
+    """A wrong type is not a crash-and-move-on.
+
+    `refs` arriving as a list makes _announce raise *after* it has already
+    posted, so progress is never saved and the next poll posts again — for
+    the whole broadcast. Rejecting the file up front keeps the
+    never-post-twice guarantee intact.
+    """
+    path = tmp_path / "state.json"
+    _write_state(path, **{field: bad_value})
+
+    announcer, targets, _ = _make(state_path=str(path))
+
+    assert announcer._state is None
+    for _ in range(3):
+        announcer.handle_stream(_stream(stream_id="42"))
+        clock.advance(60)
+    assert len(targets["twitter"].posts) == 1
+
+
+def test_a_well_formed_state_file_is_still_restored(clock, tmp_path):
+    path = tmp_path / "state.json"
+    _write_state(
+        path,
+        announced=True,
+        refs={"twitter": {"id": "twitter-1"}},
+        youtube_pending=["twitter"],
+        announce_attempts=1,
+    )
+
+    announcer, targets, _ = _make(state_path=str(path))
+
+    assert announcer._state is not None
+    announcer.handle_stream(_stream(stream_id="42"))
+    assert targets["twitter"].posts == []  # already announced, nothing re-posted

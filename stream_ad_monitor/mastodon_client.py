@@ -26,7 +26,7 @@ from typing import Optional
 
 import requests
 
-from . import raise_on_redirect, require_secure_url
+from . import guard_loopback_session, raise_on_redirect, require_secure_url
 
 logger = logging.getLogger(__name__)
 
@@ -68,6 +68,7 @@ class MastodonClient:
         self.max_chars = max_chars if max_chars > 0 else 0
         self._detected_max_chars: Optional[int] = None
         self._session = session or requests.Session()
+        guard_loopback_session(self._session, self.instance_url)
 
     @staticmethod
     def _validate_visibility(visibility: str) -> str:

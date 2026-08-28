@@ -61,3 +61,24 @@ def raise_on_redirect(response, what: str) -> None:
             "followed because this request carries credentials. Point the "
             "configured URL straight at the API host."
         )
+
+
+def _is_loopback_http(url: str) -> bool:
+    parsed = urlparse(url)
+    return parsed.scheme == "http" and parsed.hostname in _LOOPBACK_HOSTS
+
+
+def guard_loopback_session(session, url: str) -> None:
+    """Keep proxy environment variables from intercepting loopback traffic.
+
+    :func:`require_secure_url` permits plain http for loopback on the
+    reasoning that there is no network to sniff. Proxy environment variables
+    break that reasoning: with ``HTTP_PROXY`` or ``ALL_PROXY`` set and
+    ``NO_PROXY`` not covering localhost, requests routes the call — and the
+    credentials it carries — to the proxy instead. Turning off ``trust_env``
+    for exactly those sessions restores it, while https endpoints keep normal
+    proxy behaviour (which a deployment behind a corporate proxy needs).
+    """
+    if _is_loopback_http(url):
+        logger.debug("Ignoring proxy environment for loopback endpoint %s.", url)
+        session.trust_env = False

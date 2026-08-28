@@ -351,3 +351,18 @@ def test_posting_refuses_a_redirect_too():
 
     with pytest.raises(RuntimeError, match="redirected"):
         _client().post("hello")
+
+
+def test_a_loopback_pds_ignores_proxy_environment(monkeypatch):
+    """Otherwise HTTP_PROXY/ALL_PROXY would receive the app password."""
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.example:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    client = BlueskyClient("h.bsky.social", "pw", pds_url="http://localhost:2583")
+
+    assert client._session.trust_env is False
+
+
+def test_an_https_pds_keeps_normal_proxy_behaviour():
+    assert BlueskyClient("h.bsky.social", "pw")._session.trust_env is True

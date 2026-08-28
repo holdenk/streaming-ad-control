@@ -399,3 +399,28 @@ def test_posting_refuses_a_redirect():
         _client(max_chars=500).post("hello")
 
     assert not [c for c in resp_lib.calls if c.request.url.startswith("http://")]
+
+
+def test_a_loopback_instance_ignores_proxy_environment(monkeypatch):
+    """Otherwise HTTP_PROXY/ALL_PROXY would receive the access token.
+
+    Plain http is only allowed for loopback because there is no network to
+    sniff — a proxy env var would put one back.
+    """
+    monkeypatch.setenv("HTTP_PROXY", "http://proxy.example:8080")
+    monkeypatch.setenv("ALL_PROXY", "http://proxy.example:8080")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+
+    client = MastodonClient("token123", "http://localhost:3000")
+
+    assert client._session.trust_env is False
+    proxies = client._session.merge_environment_settings(
+        "http://localhost:3000", {}, None, None, None
+    )["proxies"]
+    assert dict(proxies) == {}
+
+
+def test_an_https_instance_keeps_normal_proxy_behaviour():
+    """A deployment behind a corporate proxy still needs it."""
+    assert MastodonClient("token123")._session.trust_env is True
