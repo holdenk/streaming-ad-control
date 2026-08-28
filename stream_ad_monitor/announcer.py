@@ -260,6 +260,8 @@ class StreamAnnouncer:
         count graphemes, and it's what keeps a CJK title from pushing the
         whole post past X's limit and getting it rejected.
         """
+        if self.settings.title_max_chars <= 0:
+            return title  # ANNOUNCE_TITLE_MAX_CHARS=0 disables trimming
         return truncate_weighted(title, self.settings.title_max_chars)
 
     def render_announcement(self, title: str, youtube_url: str = "") -> str:
@@ -373,7 +375,9 @@ class StreamAnnouncer:
 
         text = self._render(self.settings.template, title, youtube_url)
         state.announce_attempts += 1
-        refs = self._post_to_all(text, pending)
+        refs = self._post_to_all(
+            text, pending, dedupe_key=f"{state.stream_id}:announce"
+        )
         state.refs.update(refs)
 
         if youtube_url:
@@ -434,7 +438,11 @@ class StreamAnnouncer:
                 state.youtube_pending.remove(name)
                 continue
             try:
-                client.post(text, reply_to=state.refs.get(name))
+                client.post(
+                    text,
+                    reply_to=state.refs.get(name),
+                    dedupe_key=f"{state.stream_id}:youtube",
+                )
                 state.youtube_pending.remove(name)
             except Exception:
                 logger.exception(
@@ -512,11 +520,18 @@ class StreamAnnouncer:
         state.youtube_failures = 0
         return video.url if video else ""
 
-    def _post_to_all(self, text: str, names: List[str]) -> Dict[str, dict]:
+    def _post_to_all(
+        self, text: str, names: List[str], dedupe_key: str = ""
+    ) -> Dict[str, dict]:
         """Post *text* to *names*; return refs for the ones that accepted it.
 
         A platform that errors is simply absent from the result — the others
         still get their post, and the caller decides whether to retry.
+
+        *dedupe_key* identifies the broadcast and phase, so a platform that
+        supports idempotent posting can collapse a retry of *this* post
+        without confusing it for an identically worded one from another
+        broadcast.
         """
         refs: Dict[str, dict] = {}
         for name in names:
@@ -524,7 +539,7 @@ class StreamAnnouncer:
             if client is None:
                 continue
             try:
-                refs[name] = client.post(text)
+                refs[name] = client.post(text, dedupe_key=dedupe_key)
             except Exception:
                 logger.exception("Failed to post the announcement to %s.", name)
         return refs

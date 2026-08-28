@@ -26,6 +26,8 @@ from typing import Optional
 
 import requests
 
+from . import require_secure_url
+
 logger = logging.getLogger(__name__)
 
 DEFAULT_INSTANCE_URL = "https://tech.lgbt"
@@ -57,7 +59,10 @@ class MastodonClient:
         if not access_token:
             raise ValueError("MastodonClient requires MASTODON_ACCESS_TOKEN.")
         self.access_token = access_token
-        self.instance_url = (instance_url or DEFAULT_INSTANCE_URL).rstrip("/")
+        self.instance_url = require_secure_url(
+            (instance_url or DEFAULT_INSTANCE_URL).rstrip("/"),
+            "MASTODON_INSTANCE_URL",
+        )
         self.visibility = self._validate_visibility(visibility)
         # 0 means "ask the instance on first use".
         self.max_chars = max_chars if max_chars > 0 else 0
@@ -129,19 +134,31 @@ class MastodonClient:
     # Posting
     # ------------------------------------------------------------------
 
-    def post(self, text: str, reply_to: Optional[dict] = None) -> dict:
+    def post(
+        self,
+        text: str,
+        reply_to: Optional[dict] = None,
+        dedupe_key: str = "",
+    ) -> dict:
         """Publish *text*, optionally as a reply threaded under *reply_to*.
 
         Args:
             text: Post body. Truncated at the instance's character limit.
                 URLs are linkified by the server.
             reply_to: A ref previously returned by this method.
+            dedupe_key: Identifies the operation (broadcast + phase) behind
+                this post. It becomes the idempotency key, so a retry of the
+                same operation collapses server-side while two broadcasts
+                that happen to render identical text stay distinct. Falls
+                back to the text itself when the caller has nothing better.
 
         Returns:
             A ref dict: ``{"id": ..., "url": ...}``.
 
         Raises:
             requests.HTTPError: On any non-2xx response.
+            RuntimeError: If the response carries no status id — without one
+                the YouTube follow-up could not be threaded onto this post.
         """
         text = self._truncate(text)
         body = {"status": text, "visibility": self.visibility}
@@ -154,9 +171,10 @@ class MastodonClient:
             json=body,
             headers={
                 "Authorization": f"Bearer {self.access_token}",
-                # Derived from the content so that a retry of *this* post is
-                # recognised, while a genuinely different one is not.
-                "Idempotency-Key": _idempotency_key(text, reply_id),
+                # Keyed on the operation so a retry of *this* post is
+                # recognised, while an identically worded post from another
+                # broadcast is not.
+                "Idempotency-Key": _idempotency_key(dedupe_key or text, reply_id),
             },
             timeout=_REQUEST_TIMEOUT_SEC,
         )
@@ -168,8 +186,18 @@ class MastodonClient:
             )
         response.raise_for_status()
 
-        payload = response.json() or {}
-        ref = {"id": str(payload.get("id", "")), "url": payload.get("url", "")}
+        try:
+            payload = response.json() or {}
+        except ValueError:
+            payload = {}
+        status_id = str(payload.get("id") or "")
+        if not status_id:
+            raise RuntimeError(
+                "Mastodon returned success but no status id "
+                f"(body: {response.text[:200]!r}); treating the post as "
+                "failed so it isn't threaded onto or reported as posted."
+            )
+        ref = {"id": status_id, "url": payload.get("url", "")}
         logger.info("Posted to Mastodon: %s", ref["url"] or self.instance_url)
         return ref
 
@@ -194,5 +222,5 @@ class MastodonClient:
             logger.debug("HTTP session close raised; ignoring.", exc_info=True)
 
 
-def _idempotency_key(text: str, reply_id: str) -> str:
-    return hashlib.sha256(f"{reply_id}\x00{text}".encode("utf-8")).hexdigest()
+def _idempotency_key(operation: str, reply_id: str) -> str:
+    return hashlib.sha256(f"{reply_id}\x00{operation}".encode("utf-8")).hexdigest()

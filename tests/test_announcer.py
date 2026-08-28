@@ -31,9 +31,11 @@ class FakeTarget:
         self.name = name
         self.fail = fail
         self.posts = []  # (text, reply_to)
+        self.dedupe_keys = []
 
-    def post(self, text, reply_to=None):
+    def post(self, text, reply_to=None, dedupe_key=""):
         self.posts.append((text, reply_to))
+        self.dedupe_keys.append(dedupe_key)
         if self.fail:
             raise RuntimeError(f"{self.name} is down")
         return {"id": f"{self.name}-{len(self.posts)}"}
@@ -730,3 +732,35 @@ def test_build_announcer_returns_none_when_no_client_survives():
         "stream_ad_monitor.announcer.BlueskyClient", side_effect=RuntimeError("boom")
     ):
         assert build_announcer("holden", settings) is None
+
+
+# ---------------------------------------------------------------------------
+# Idempotency scoping
+# ---------------------------------------------------------------------------
+
+
+def test_each_broadcast_and_phase_gets_its_own_dedupe_key(clock):
+    """Platforms with idempotent posting need these distinct; see the
+    Mastodon client for what collides otherwise."""
+    announcer, targets, _ = _make(youtube_results=[None, LiveVideo("abc12345678")])
+
+    announcer.handle_stream(_stream(stream_id="1", title="Spark"))
+    clock.advance(60)
+    announcer.handle_stream(_stream(stream_id="1", title="Spark"))
+    clock.advance(60)
+    announcer.handle_stream(_stream(stream_id="2", title="Spark"))
+
+    keys = targets["twitter"].dedupe_keys
+    assert keys == ["1:announce", "1:youtube", "2:announce"]
+    assert len(set(keys)) == 3
+
+
+def test_a_retried_announcement_keeps_the_same_dedupe_key(clock):
+    """So a post that landed but timed out isn't duplicated on retry."""
+    announcer, targets, _ = _make(targets={"twitter": FakeTarget("twitter", fail=True)})
+
+    announcer.handle_stream(_stream(stream_id="7"))
+    clock.advance(60)
+    announcer.handle_stream(_stream(stream_id="7"))
+
+    assert targets["twitter"].dedupe_keys == ["7:announce", "7:announce"]

@@ -76,9 +76,10 @@ page, the failure mode is a missing follow-up post, never a wrong link.
 Two guarantees, since the failure modes here are public:
 
 - **Never post twice for the same stream.** State is keyed by the Twitch
-  stream id, survives a daemon restart via `ANNOUNCE_STATE_FILE`, and a
-  stream that briefly reads as offline (the Twitch API does drop the odd
-  poll) does not reset it.
+  stream id, and a stream that briefly reads as offline (the Twitch API does
+  drop the odd poll) does not reset it. Across a *restart* the guarantee
+  holds only if `ANNOUNCE_STATE_FILE` is set — that state is in memory
+  otherwise, and `Restart=on-failure` will re-announce the live stream.
 - **Never break ad control.** Every post and lookup is best-effort; a social
   API outage is logged and retried on a budget, and the campaign toggles
   carry on regardless.
@@ -91,7 +92,7 @@ chromedriver, but you still need Chromium itself on the host:
 ```sh
 sudo apt-get install -y chromium-browser
 # (or chromium / google-chrome — any Blink-based browser selenium can drive)
-```
+```dotenv
 
 ```sh
 # 1. Create unprivileged service user
@@ -132,7 +133,8 @@ BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 MASTODON_ACCESS_TOKEN=...
 # Optional: follow up with the YouTube link once the simulcast is up
 YOUTUBE_CHANNEL_HANDLE=@yourhandle
-# Recommended when announcing: keeps a restart mid-stream from posting twice
+# Required for the no-duplicate-posts guarantee: without it, a restart
+# mid-stream re-announces the stream you are already on
 ANNOUNCE_STATE_FILE=/var/lib/streaming-ad-monitor/announce-state.json
 EOF
 sudo chmod 640 /etc/streaming-ad-monitor/env
@@ -211,7 +213,7 @@ and no refresh dance.
    Access Token and Secret **for the account that should appear as the
    author**, into:
 
-```
+```dotenv
 TWITTER_API_KEY=...
 TWITTER_API_SECRET=...
 TWITTER_ACCESS_TOKEN=...
@@ -230,14 +232,17 @@ repeatedly.
    password, never your account password.
 2. Set your full handle (the one in your profile URL):
 
-```
+```dotenv
 BLUESKY_HANDLE=you.bsky.social
 BLUESKY_APP_PASSWORD=xxxx-xxxx-xxxx-xxxx
 ```
 
 Self-hosting a PDS? Point `BLUESKY_PDS_URL` at it (default
-`https://bsky.social`). Links are posted with rich-text facets so they're
-clickable — Bluesky does not auto-detect URLs in API posts.
+`https://bsky.social`). It must be `https://` — it carries your app password —
+except for `localhost`, where there is no network to sniff.
+
+Links are posted with rich-text facets so they're clickable; Bluesky does not
+auto-detect URLs in API posts.
 
 ### Mastodon
 
@@ -247,12 +252,13 @@ The simplest of the three: one access token, and it doesn't expire.
    `write:statuses` scope is all this needs — uncheck the rest.
 2. Copy **Your access token** from the application's page:
 
-```
+```dotenv
 MASTODON_ACCESS_TOKEN=...
 ```
 
 The instance defaults to `https://tech.lgbt`; set `MASTODON_INSTANCE_URL` for
-any other one. `MASTODON_VISIBILITY` takes `public` (default), `unlisted`,
+any other one. It must be `https://` (it carries your access token), except
+for `localhost`. `MASTODON_VISIBILITY` takes `public` (default), `unlisted`,
 `private`, or `direct`.
 
 The post length limit is read from the instance on the first post rather than
@@ -260,16 +266,19 @@ assumed — the stock limit is 500, but forks routinely raise it (tech.lgbt runs
 glitch-soc at 1024), so either constant would be wrong somewhere. Set
 `MASTODON_MAX_CHARS` to pin it and skip the lookup.
 
-Posts carry an idempotency key derived from their text, so a retry after a
-request that timed out *after* the post landed is collapsed by the server
-rather than double-posting.
+Posts carry an idempotency key identifying the broadcast and which post it
+is (announcement or YouTube follow-up), so a retry after a request that timed
+out *after* the post landed is collapsed by the server rather than
+double-posting — while two streams that happen to share a title stay
+distinct, which keeps the second one's follow-up from threading onto the
+first one's announcement.
 
 ### YouTube link
 
 No API key, no Google Cloud project — set the channel whose `/live` page
 should be watched:
 
-```
+```dotenv
 YOUTUBE_CHANNEL_HANDLE=@yourhandle
 ```
 
@@ -281,7 +290,7 @@ announcements simply carry the Twitch link.
 
 Defaults:
 
-```
+```text
 🔴 Live now: {title}
 
 https://twitch.tv/<channel>
@@ -289,7 +298,7 @@ https://twitch.tv/<channel>
 
 then, as a reply once the simulcast is up:
 
-```
+```text
 Also streaming on YouTube: https://www.youtube.com/watch?v=…
 ```
 
@@ -298,7 +307,7 @@ Placeholders: `{title}`, `{channel}`, `{twitch_url}`, `{youtube_url}`, and
 `{links}` (every link known at post time, one per line). An env file can't
 hold a real newline, so write `\n` for a line break:
 
-```
+```dotenv
 ANNOUNCE_TEMPLATE="🔴 Live now: {title}\n\n{links}"
 ```
 
@@ -342,7 +351,7 @@ token is read-only is much nicer here than at the top of a stream:
 
 # Actually post to every configured platform (then delete the test posts).
 ./venv/bin/python scripts/test_announce.py --title "test post, ignore"
-```
+```dotenv
 
 ## Enable the service
 

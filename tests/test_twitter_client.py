@@ -130,7 +130,8 @@ def test_truncation_does_not_cut_into_a_url():
     _client().post("観" * 200 + " " + url)
 
     text = json.loads(resp_lib.calls[0].request.body)["text"]
-    assert url not in text or text.endswith(url)
+    # A partial URL must not survive: either the whole link is there or none is.
+    assert text.endswith(url) or "https://" not in text
 
 
 # ---------------------------------------------------------------------------

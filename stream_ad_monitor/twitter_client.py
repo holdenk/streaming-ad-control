@@ -90,13 +90,22 @@ class TwitterClient:
     # Posting
     # ------------------------------------------------------------------
 
-    def post(self, text: str, reply_to: Optional[dict] = None) -> dict:
+    def post(
+        self,
+        text: str,
+        reply_to: Optional[dict] = None,
+        dedupe_key: str = "",
+    ) -> dict:
         """Publish *text*, optionally as a reply to a previous post.
 
         Args:
             text: Post body. Truncated at 280 characters.
             reply_to: A ref previously returned by this method; the new post
                 threads under it.
+            dedupe_key: Accepted for interface parity with the other
+                platforms and ignored — X has no idempotency key, though it
+                does reject a post duplicating a recent one with a 403,
+                which covers the same ground for identical text.
 
         Returns:
             A ref dict: ``{"id": ..., "url": ...}``.

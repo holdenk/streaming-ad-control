@@ -288,3 +288,98 @@ def test_explicit_limit_skips_detection_entirely():
     _client(max_chars=2000).post("hello")
 
     assert all(c.request.method == "POST" for c in resp_lib.calls)
+
+
+# ---------------------------------------------------------------------------
+# Endpoint safety
+# ---------------------------------------------------------------------------
+
+
+def test_a_plain_http_instance_is_refused():
+    """The access token would go over the wire in the clear."""
+    with pytest.raises(ValueError, match="https"):
+        MastodonClient("token123", "http://tech.lgbt")
+
+
+def test_a_scheme_less_instance_is_refused():
+    with pytest.raises(ValueError, match="https"):
+        MastodonClient("token123", "tech.lgbt")
+
+
+@pytest.mark.parametrize(
+    "url", ["http://localhost:3000", "http://127.0.0.1:3000", "http://[::1]:3000"]
+)
+def test_plain_http_is_allowed_for_loopback(url):
+    """Self-hosting on the same box has no network to sniff."""
+    assert MastodonClient("token123", url).instance_url == url
+
+
+# ---------------------------------------------------------------------------
+# Response handling
+# ---------------------------------------------------------------------------
+
+
+@resp_lib.activate
+def test_success_without_a_status_id_is_an_error():
+    """An empty id would leave the YouTube reply unthreaded."""
+    resp_lib.add(resp_lib.POST, _STATUSES_URL, json={"url": "x"}, status=200)
+
+    with pytest.raises(RuntimeError, match="no status id"):
+        _client(max_chars=500).post("hello")
+
+
+@resp_lib.activate
+def test_success_with_a_non_json_body_is_an_error():
+    resp_lib.add(resp_lib.POST, _STATUSES_URL, body="not json", status=200)
+
+    with pytest.raises(RuntimeError, match="no status id"):
+        _client(max_chars=500).post("hello")
+
+
+# ---------------------------------------------------------------------------
+# Idempotency scoping
+# ---------------------------------------------------------------------------
+
+
+@resp_lib.activate
+def test_the_same_operation_retried_shares_a_key():
+    for _ in range(2):
+        resp_lib.add(resp_lib.POST, _STATUSES_URL, json=_status(), status=200)
+
+    client = _client(max_chars=500)
+    client.post("🔴 Live now: Spark", dedupe_key="stream1:announce")
+    client.post("🔴 Live now: Spark", dedupe_key="stream1:announce")
+
+    keys = [r.headers["Idempotency-Key"] for r in _post_requests()]
+    assert keys[0] == keys[1]
+
+
+@resp_lib.activate
+def test_identical_text_from_different_broadcasts_does_not_collide():
+    """Two streams with the same title must not dedupe into one another.
+
+    Otherwise the server returns the earlier status and the second stream's
+    YouTube reply threads onto the first stream's announcement.
+    """
+    for _ in range(2):
+        resp_lib.add(resp_lib.POST, _STATUSES_URL, json=_status(), status=200)
+
+    client = _client(max_chars=500)
+    client.post("🔴 Live now: Spark", dedupe_key="stream1:announce")
+    client.post("🔴 Live now: Spark", dedupe_key="stream2:announce")
+
+    keys = [r.headers["Idempotency-Key"] for r in _post_requests()]
+    assert keys[0] != keys[1]
+
+
+@resp_lib.activate
+def test_the_two_phases_of_one_broadcast_do_not_collide():
+    for _ in range(2):
+        resp_lib.add(resp_lib.POST, _STATUSES_URL, json=_status(), status=200)
+
+    client = _client(max_chars=500)
+    client.post("same text", dedupe_key="stream1:announce")
+    client.post("same text", dedupe_key="stream1:youtube")
+
+    keys = [r.headers["Idempotency-Key"] for r in _post_requests()]
+    assert keys[0] != keys[1]

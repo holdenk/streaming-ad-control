@@ -289,3 +289,14 @@ def test_success_with_a_non_json_body_is_an_error():
 
     with pytest.raises(RuntimeError, match="no uri/cid"):
         _client().post("hello")
+
+
+def test_a_plain_http_pds_is_refused():
+    """The app password would go over the wire in the clear."""
+    with pytest.raises(ValueError, match="https"):
+        BlueskyClient("h.bsky.social", "pw", pds_url="http://pds.example.com")
+
+
+def test_plain_http_is_allowed_for_a_loopback_pds():
+    client = BlueskyClient("h.bsky.social", "pw", pds_url="http://localhost:2583")
+    assert client.pds_url == "http://localhost:2583"

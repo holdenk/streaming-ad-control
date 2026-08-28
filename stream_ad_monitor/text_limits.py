@@ -60,8 +60,17 @@ def truncate_weighted(text: str, limit: int) -> str:
 
     URLs are indivisible — a half-URL is worse than no URL — so truncation
     stops before one rather than cutting into it.
+
+    Raises:
+        ValueError: If *limit* is negative. A limit of 0 yields an empty
+            string; callers that mean "don't truncate" say so themselves
+            rather than passing 0.
     """
-    if limit <= 0 or weighted_length(text) <= limit:
+    if limit < 0:
+        raise ValueError(f"limit must be non-negative, got {limit}.")
+    if limit == 0:
+        return ""
+    if weighted_length(text) <= limit:
         return text
 
     budget = limit - weighted_length(_ELLIPSIS)

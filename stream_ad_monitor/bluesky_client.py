@@ -28,6 +28,8 @@ from typing import List, Optional
 
 import requests
 
+from . import require_secure_url
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_PDS_URL = "https://bsky.social"
@@ -97,7 +99,9 @@ class BlueskyClient:
             )
         self.handle = handle.lstrip("@")
         self.app_password = app_password
-        self.pds_url = (pds_url or _DEFAULT_PDS_URL).rstrip("/")
+        self.pds_url = require_secure_url(
+            (pds_url or _DEFAULT_PDS_URL).rstrip("/"), "BLUESKY_PDS_URL"
+        )
         self._session = session or requests.Session()
         self._access_jwt: Optional[str] = None
         self._refresh_jwt: Optional[str] = None
@@ -167,13 +171,22 @@ class BlueskyClient:
     # Posting
     # ------------------------------------------------------------------
 
-    def post(self, text: str, reply_to: Optional[dict] = None) -> dict:
+    def post(
+        self,
+        text: str,
+        reply_to: Optional[dict] = None,
+        dedupe_key: str = "",
+    ) -> dict:
         """Publish *text*, optionally as a reply threaded under *reply_to*.
 
         Args:
             text: Post body. Truncated at 300 characters. URLs in it are
                 turned into clickable link facets automatically.
             reply_to: A ref previously returned by this method.
+            dedupe_key: Accepted for interface parity with the other
+                platforms and ignored — the AT Protocol has no idempotency
+                key, so a retry after a request that timed out post-delivery
+                can duplicate.
 
         Returns:
             A ref dict: ``{"uri": ..., "cid": ..., "url": ...}``. ``uri`` and
