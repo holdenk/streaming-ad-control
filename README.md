@@ -92,6 +92,23 @@ Two guarantees, since the failure modes here are public:
   API outage is logged and retried on a budget, and the campaign toggles
   carry on regardless.
 
+## Quick start: the setup wizard
+
+Rather than editing the env file by hand, run the interactive wizard. It walks
+the whole setup in order — driver (daemon vs OBS), ad networks, keyword rules,
+and optional announcements — prints exactly where to click for each token, and
+writes a ready-to-use env file (and a `rules.yaml` if you need multiple rules).
+It's static: it asks questions and writes files, talking to no network service
+of its own. At the end it offers to install deps, bootstrap the Reddit session,
+and verify the toggles.
+
+```sh
+python scripts/setup.py
+```
+
+The manual steps below are what the wizard automates; read them to understand
+what it writes, or follow them directly if you'd rather not run the wizard.
+
 ## Install
 
 Selenium needs a Chromium and a matching driver. Selenium Manager auto-fetches
