@@ -4,8 +4,6 @@ import importlib.util
 import os
 from unittest.mock import MagicMock, patch
 
-import pytest
-
 # The gate is a CLI script under scripts/, not a package module. Load it by path.
 _GATE_PATH = os.path.join(
     os.path.dirname(os.path.dirname(os.path.abspath(__file__))),

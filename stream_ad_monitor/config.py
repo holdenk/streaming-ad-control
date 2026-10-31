@@ -75,6 +75,25 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_bounded_int(
+    name: str, default: int, *, minimum: int = 0, allow_zero: bool = True
+) -> int:
+    """Read an integer setting and fall back when it is outside its domain."""
+    value = _env_int(name, default)
+    valid = value >= minimum and (allow_zero or value != 0)
+    if valid:
+        return value
+    comparator = f">= {minimum}" if allow_zero else f"> {minimum}"
+    logger.warning(
+        "Environment variable '%s'=%r must be %s; using default %d.",
+        name,
+        value,
+        comparator,
+        default,
+    )
+    return default
+
+
 def _env_list(name: str) -> List[str]:
     """Split a comma-separated env var into a list of non-empty entries."""
     return [part.strip() for part in _optional(name).split(",") if part.strip()]
@@ -156,7 +175,9 @@ class Config:
             )
 
         # How often to poll Twitch (seconds)
-        self.poll_interval: int = int(os.environ.get("POLL_INTERVAL", "60"))
+        self.poll_interval: int = _env_bounded_int(
+            "POLL_INTERVAL", 60, minimum=0, allow_zero=False
+        )
 
         # Load rules ---------------------------------------------------
         rules_file = os.environ.get("RULES_FILE")
@@ -291,10 +312,16 @@ class Config:
             youtube_template=_env_template(
                 "ANNOUNCE_YOUTUBE_TEMPLATE", DEFAULT_YOUTUBE_TEMPLATE
             ),
-            title_max_chars=_env_int("ANNOUNCE_TITLE_MAX_CHARS", 140),
-            wait_for_youtube_sec=_env_int("ANNOUNCE_WAIT_FOR_YOUTUBE_SEC", 0),
-            youtube_lookup_interval=_env_int("YOUTUBE_LOOKUP_INTERVAL", 60),
-            youtube_lookup_timeout=_env_int("YOUTUBE_LOOKUP_TIMEOUT", 1800),
+            title_max_chars=_env_bounded_int("ANNOUNCE_TITLE_MAX_CHARS", 140),
+            wait_for_youtube_sec=_env_bounded_int(
+                "ANNOUNCE_WAIT_FOR_YOUTUBE_SEC", 0
+            ),
+            youtube_lookup_interval=_env_bounded_int(
+                "YOUTUBE_LOOKUP_INTERVAL", 60, minimum=0, allow_zero=False
+            ),
+            youtube_lookup_timeout=_env_bounded_int(
+                "YOUTUBE_LOOKUP_TIMEOUT", 1800, minimum=0, allow_zero=False
+            ),
             state_path=_optional("ANNOUNCE_STATE_FILE"),
             twitter_api_key=_optional("TWITTER_API_KEY"),
             twitter_api_secret=_optional("TWITTER_API_SECRET"),
@@ -306,7 +333,7 @@ class Config:
             mastodon_access_token=_optional("MASTODON_ACCESS_TOKEN"),
             mastodon_instance_url=_optional("MASTODON_INSTANCE_URL"),
             mastodon_visibility=_optional("MASTODON_VISIBILITY"),
-            mastodon_max_chars=_env_int("MASTODON_MAX_CHARS", 0),
+            mastodon_max_chars=_env_bounded_int("MASTODON_MAX_CHARS", 0),
             youtube_channel_handle=_optional("YOUTUBE_CHANNEL_HANDLE"),
             youtube_channel_id=_optional("YOUTUBE_CHANNEL_ID"),
             youtube_live_url=_optional("YOUTUBE_LIVE_URL"),

@@ -92,7 +92,7 @@ def _as_str_list(value) -> List[str]:
         return []
     if not isinstance(value, list):
         value = [value]
-    return [str(v).strip() for v in value]
+    return [item for v in value if (item := str(v).strip())]
 
 
 def load_rules_from_yaml(path: str) -> List[Rule]:
@@ -127,12 +127,20 @@ def load_rules_from_yaml(path: str) -> List[Rule]:
     with open(path, "r", encoding="utf-8") as fh:
         data = yaml.safe_load(fh)
 
-    raw_rules = (data or {}).get("rules", [])
+    if data is None:
+        data = {}
+    if not isinstance(data, dict):
+        raise ValueError(f"Rules file '{path}' must contain a YAML mapping.")
+    raw_rules = data.get("rules", [])
     if not raw_rules:
         raise ValueError(f"No rules found in '{path}'.")
+    if not isinstance(raw_rules, list):
+        raise ValueError(f"The 'rules' value in '{path}' must be a list.")
 
     rules: List[Rule] = []
     for idx, raw in enumerate(raw_rules):
+        if not isinstance(raw, dict):
+            raise ValueError(f"Rule at index {idx} must be a YAML mapping.")
         name = raw.get("name", f"rule_{idx}")
         keywords = _as_str_list(raw.get("keywords"))
         if not keywords:

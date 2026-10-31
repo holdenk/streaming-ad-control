@@ -131,6 +131,15 @@ def test_config_custom_poll_interval():
     assert cfg.poll_interval == 30
 
 
+@pytest.mark.parametrize("value", ["invalid", "0", "-5"])
+def test_config_invalid_poll_interval_uses_safe_default(value, caplog):
+    env = {**LEGACY_ENV, "POLL_INTERVAL": value}
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert cfg.poll_interval == 60
+    assert "POLL_INTERVAL" in caplog.text
+
+
 @pytest.mark.parametrize(
     "missing_key, expected_message_fragment",
     [

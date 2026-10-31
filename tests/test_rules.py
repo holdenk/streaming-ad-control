@@ -98,6 +98,30 @@ def test_load_rules_raises_on_missing_rules_key(tmp_path):
         load_rules_from_yaml(str(rules_yaml))
 
 
+@pytest.mark.parametrize(
+    "contents, message",
+    [
+        ("- not-a-mapping\n", "YAML mapping"),
+        ("rules: not-a-list\n", "must be a list"),
+        ("rules: [not-a-mapping]\n", "index 0"),
+    ],
+)
+def test_load_rules_reports_malformed_structure(tmp_path, contents, message):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(contents)
+    with pytest.raises(ValueError, match=message):
+        load_rules_from_yaml(str(rules_yaml))
+
+
+def test_load_rules_rejects_blank_keywords_and_campaign_ids(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        "rules:\n  - name: blank\n    keywords: ['  ']\n    campaign_ids: ['  ']\n"
+    )
+    with pytest.raises(ValueError, match="no keywords"):
+        load_rules_from_yaml(str(rules_yaml))
+
+
 def test_load_rules_raises_when_rule_has_no_keywords(tmp_path):
     rules_yaml = tmp_path / "rules.yaml"
     rules_yaml.write_text(

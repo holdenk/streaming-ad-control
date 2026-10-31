@@ -91,7 +91,7 @@ def ask(prompt: str, default: str = "", *, secret: bool = False,
         if secret:
             # getpass can't show a default inline usefully; note it instead.
             if default:
-                print(f"  (press ENTER to keep the current value)")
+                print("  (press ENTER to keep the current value)")
             raw = getpass(f"  {prompt}{suffix}: ")
         else:
             raw = _read(f"  {prompt}{suffix}: ")

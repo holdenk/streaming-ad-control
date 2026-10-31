@@ -13,6 +13,7 @@ logger = logging.getLogger(__name__)
 
 _TOKEN_URL = "https://id.twitch.tv/oauth2/token"
 _HELIX_BASE = "https://api.twitch.tv/helix"
+_REQUEST_TIMEOUT_SEC = 30
 
 
 class TwitchClient:
@@ -41,6 +42,7 @@ class TwitchClient:
                 "client_secret": self.client_secret,
                 "grant_type": "client_credentials",
             },
+            timeout=_REQUEST_TIMEOUT_SEC,
         )
         if not response.ok:
             logger.error(
@@ -72,6 +74,7 @@ class TwitchClient:
             f"{_HELIX_BASE}/streams",
             params={"user_login": user_login},
             headers=headers,
+            timeout=_REQUEST_TIMEOUT_SEC,
         )
 
         if response.status_code == 401:
@@ -83,6 +86,7 @@ class TwitchClient:
                 f"{_HELIX_BASE}/streams",
                 params={"user_login": user_login},
                 headers=headers,
+                timeout=_REQUEST_TIMEOUT_SEC,
             )
 
         if not response.ok:
