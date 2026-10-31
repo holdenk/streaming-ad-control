@@ -268,6 +268,108 @@ def test_multi_rule_keyword_matching_is_case_insensitive():
 
 
 # ---------------------------------------------------------------------------
+# StreamAdMonitor.apply – stateless desired-state application
+# ---------------------------------------------------------------------------
+
+
+def test_apply_enables_matching_campaign_when_live():
+    monitor, twitch, reddit = _make_monitor([])
+    monitor.apply("Apache Spark tutorial", live=True)
+    reddit.enable_campaign.assert_called_once_with("camp_456")
+    reddit.disable_campaign.assert_not_called()
+    assert monitor._rule_enabled[0] is True
+
+
+def test_apply_pauses_when_title_does_not_match_even_if_live():
+    monitor, twitch, reddit = _make_monitor([])
+    monitor.apply("Just chatting today", live=True)
+    reddit.enable_campaign.assert_not_called()
+    reddit.disable_campaign.assert_called_once_with("camp_456")
+    assert monitor._rule_enabled[0] is False
+
+
+def test_apply_pauses_when_not_live_regardless_of_title():
+    monitor, twitch, reddit = _make_monitor([])
+    monitor.apply("Apache Spark tutorial", live=False)
+    reddit.enable_campaign.assert_not_called()
+    reddit.disable_campaign.assert_called_once_with("camp_456")
+    assert monitor._rule_enabled[0] is False
+
+
+def test_apply_is_stateless_and_repeats_toggles():
+    """Unlike check(), apply() re-issues the toggle every call (no edge tracking)."""
+    monitor, twitch, reddit = _make_monitor([])
+    monitor.apply("Spark", live=True)
+    monitor.apply("Spark", live=True)
+    assert reddit.enable_campaign.call_count == 2
+
+
+def test_apply_never_polls_twitch():
+    """apply() acts on the title it's given; it must not call the Twitch client."""
+    monitor, twitch, reddit = _make_monitor([])
+    monitor.apply("Spark", live=True)
+    twitch.get_stream.assert_not_called()
+
+
+def test_apply_attempts_all_campaigns_then_raises_on_failure():
+    rules = [
+        Rule(name="Spark", keywords=["Spark"], campaign_ids=["camp_a", "camp_b"]),
+    ]
+    monitor, twitch, reddit = _make_monitor([], rules=rules)
+    reddit.enable_campaign.side_effect = [RuntimeError("boom"), {"status": "ACTIVE"}]
+
+    with pytest.raises(RuntimeError, match="failed"):
+        monitor.apply("Spark stream", live=True)
+
+    # Both campaigns were attempted even though the first raised.
+    assert reddit.enable_campaign.call_count == 2
+    reddit.enable_campaign.assert_any_call("camp_a")
+    reddit.enable_campaign.assert_any_call("camp_b")
+
+
+def test_apply_covers_both_networks():
+    rules = [
+        Rule(
+            name="Spark",
+            keywords=["Spark"],
+            campaign_ids=["reddit_camp"],
+            trafficstars_campaign_ids=["123"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor([], rules)
+    monitor.apply("Spark stream", live=True)
+    reddit.enable_campaign.assert_called_once_with("reddit_camp")
+    trafficstars.enable_campaign.assert_called_once_with("123")
+
+
+# ---------------------------------------------------------------------------
+# StreamAdMonitor.close – client teardown
+# ---------------------------------------------------------------------------
+
+
+def test_close_closes_both_network_clients():
+    rules = [
+        Rule(
+            name="Spark",
+            keywords=["Spark"],
+            campaign_ids=["reddit_camp"],
+            trafficstars_campaign_ids=["123"],
+        ),
+    ]
+    monitor, twitch, reddit, trafficstars = _make_dual_network_monitor([], rules)
+    monitor.close()
+    reddit.close.assert_called_once_with()
+    trafficstars.close.assert_called_once_with()
+
+
+def test_close_tolerates_client_errors():
+    monitor, twitch, reddit = _make_monitor([])
+    reddit.close.side_effect = RuntimeError("already gone")
+    monitor.close()  # must not raise
+    reddit.close.assert_called_once_with()
+
+
+# ---------------------------------------------------------------------------
 # StreamAdMonitor.run – loop mechanics
 # ---------------------------------------------------------------------------
 

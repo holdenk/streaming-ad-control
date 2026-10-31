@@ -100,6 +100,13 @@ class TwitchClient:
         stream = self.get_stream(user_login)
         return stream is not None
 
+    def close(self) -> None:
+        """Tear down the HTTP session. Idempotent."""
+        try:
+            self._session.close()
+        except Exception:
+            logger.debug("HTTP session close raised; ignoring.", exc_info=True)
+
     def get_stream_title(self, user_login: str) -> Optional[str]:
         """Return the current stream title, or None if the channel is offline."""
         stream = self.get_stream(user_login)
