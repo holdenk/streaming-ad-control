@@ -1,6 +1,6 @@
 """stream_ad_monitor – watches a Twitch stream, toggles ad campaigns on
-Reddit Ads and TrafficStars, and announces the stream on X, Bluesky, and
-Mastodon."""
+Reddit Ads, TrafficStars, ExoClick, PropellerAds, and Meta, and announces the
+stream on X, Bluesky, and Mastodon."""
 
 import logging
 from urllib.parse import urlparse

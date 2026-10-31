@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import logging
 import time
-from typing import List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from .announcer import StreamAnnouncer, build_announcer
 from .config import Config
+from .networks import NETWORKS_BY_KEY
 from .reddit_ad_client import RedditAdClient
 from .rules import Rule
 from .trafficstars_client import TrafficStarsClient
@@ -15,35 +16,35 @@ from .twitch_client import TwitchClient
 
 logger = logging.getLogger(__name__)
 
+# (network key, campaign id) — one physical campaign.
+CampaignKey = Tuple[str, str]
+
 
 def title_has_keyword(title: str, keyword: str) -> bool:
-    """Return True when *keyword* appears in *title* (case-insensitive)."""
+    """Return True when *keyword* appears in *title* (case-insensitive substring)."""
     return keyword.lower() in title.lower()
-
-
-def _rule_campaign_count(rule: Rule) -> int:
-    return len(rule.campaign_ids) + len(rule.trafficstars_campaign_ids)
 
 
 class StreamAdMonitor:
     """Polls Twitch and manages ad campaigns based on stream state.
 
-    For each configured rule, the monitor independently tracks whether that
-    rule's campaigns are currently enabled. A rule's campaigns are enabled
-    when the stream is live **and** the title matches at least one of the
-    rule's keywords, and disabled otherwise. Each rule may target Reddit
-    campaigns, TrafficStars campaigns, or both.
+    A campaign should run when the stream is live **and** at least one rule
+    that lists it matches the title; otherwise it should be paused. State is
+    tracked per campaign, not per rule, so a campaign shared by two rules
+    (say an FHI rule and a Spark rule) stays on while either matches instead
+    of the two rules fighting over it.
 
-    State transitions only — network toggles are issued at most once per
-    edge, so there are no redundant enable/disable operations.
+    Toggles are issued only on a campaign's state edge. Each toggle is
+    isolated: one failing campaign is logged and retried next poll, and never
+    stops the others from being enabled or paused.
 
     Ad-network clients are only constructed for networks that at least one
     rule targets, so e.g. a TrafficStars-only setup never launches the
     headless Chromium that the Reddit client needs.
 
     The same poll also feeds the optional :class:`StreamAnnouncer`, which
-    posts the stream links to X, Bluesky, and Mastodon. Announcements are best-effort
-    and never interfere with ad control.
+    posts the stream links to X, Bluesky, and Mastodon. Announcements are
+    best-effort and never interfere with ad control.
     """
 
     def __init__(
@@ -53,6 +54,7 @@ class StreamAdMonitor:
         reddit_ad_client: Optional[RedditAdClient] = None,
         trafficstars_client: Optional[TrafficStarsClient] = None,
         announcer: Optional[StreamAnnouncer] = None,
+        ad_clients: Optional[Dict[str, object]] = None,
     ) -> None:
         self.config = config
         self.twitch = twitch_client or TwitchClient(
@@ -60,94 +62,134 @@ class StreamAdMonitor:
             config.twitch_client_secret,
         )
 
-        needs_reddit = any(rule.campaign_ids for rule in config.rules)
-        needs_trafficstars = any(
-            rule.trafficstars_campaign_ids for rule in config.rules
-        )
+        needed = {
+            key for rule in config.rules for key in rule.campaigns_by_network()
+        }
 
-        self.reddit = reddit_ad_client
-        if self.reddit is None and needs_reddit:
-            self.reddit = RedditAdClient(
-                username=config.reddit_username,
-                password=config.reddit_password,
-                ads_account_id=config.reddit_ads_account_id,
-                cookie_jar_path=config.reddit_cookie_jar_path,
-                patch_body_pause=config.reddit_patch_body_pause,
-                patch_body_resume=config.reddit_patch_body_resume,
-            )
+        # Injected clients win (tests, callers sharing a client); anything
+        # else a rule needs is built here.
+        self.clients: Dict[str, object] = dict(ad_clients or {})
+        if reddit_ad_client is not None:
+            self.clients["reddit"] = reddit_ad_client
+        if trafficstars_client is not None:
+            self.clients["trafficstars"] = trafficstars_client
+        for key in needed - set(self.clients):
+            if key == "reddit":
+                self.clients[key] = RedditAdClient(
+                    username=config.reddit_username,
+                    password=config.reddit_password,
+                    ads_account_id=config.reddit_ads_account_id,
+                    cookie_jar_path=config.reddit_cookie_jar_path,
+                    patch_body_pause=config.reddit_patch_body_pause,
+                    patch_body_resume=config.reddit_patch_body_resume,
+                )
+            else:
+                network = NETWORKS_BY_KEY[key]
+                self.clients[key] = network.factory(
+                    getattr(config, network.config_attr)
+                )
+        self.reddit = self.clients.get("reddit")
+        self.trafficstars = self.clients.get("trafficstars")
 
-        self.trafficstars = trafficstars_client
-        if self.trafficstars is None and needs_trafficstars:
-            self.trafficstars = TrafficStarsClient(config.trafficstars_api_key)
-
-        # Announcements are opt-in: build_announcer returns None unless X or
-        # Bluesky credentials are configured.
+        # Announcements are opt-in: build_announcer returns None unless a
+        # social platform's credentials are configured.
         self.announcer = announcer
         if self.announcer is None:
             self.announcer = build_announcer(
                 config.twitch_channel_login, config.announce
             )
 
-        # Per-rule enabled flag; indexed in the same order as config.rules.
+        # Per-rule "currently matching" flag, indexed like config.rules. Used
+        # for logging rule transitions; the toggles key off _campaign_enabled.
         self._rule_enabled: List[bool] = [False] * len(config.rules)
+        # Last known state per campaign. Missing means paused (run() pauses
+        # everything at startup); None means a toggle failed and the state
+        # is unknown, which forces a retry on the next poll.
+        self._campaign_enabled: Dict[CampaignKey, Optional[bool]] = {}
 
-    def _rule_targets(self, rule: Rule) -> List[Tuple[str, object, List[str]]]:
-        """Yield (network_name, client, campaign_ids) for the rule's networks."""
-        targets = []
-        if rule.campaign_ids and self.reddit is not None:
-            targets.append(("reddit", self.reddit, rule.campaign_ids))
-        if rule.trafficstars_campaign_ids and self.trafficstars is not None:
-            targets.append(
-                ("trafficstars", self.trafficstars, rule.trafficstars_campaign_ids)
+        self._log_shared_campaigns()
+
+    def _log_shared_campaigns(self) -> None:
+        owners: Dict[CampaignKey, List[str]] = {}
+        for rule in self.config.rules:
+            for key in self._rule_campaigns(rule):
+                owners.setdefault(key, []).append(rule.name)
+        for (network, cid), names in owners.items():
+            if len(names) > 1:
+                logger.info(
+                    "%s campaign %s is shared by rules %s; it runs while any of "
+                    "them matches.",
+                    NETWORKS_BY_KEY[network].label,
+                    cid,
+                    names,
+                )
+
+    def _rule_campaigns(self, rule: Rule) -> List[CampaignKey]:
+        """(network, campaign_id) pairs for the rule's networks that have a client."""
+        return [
+            (network, cid)
+            for network, ids in rule.campaigns_by_network().items()
+            if self.clients.get(network) is not None
+            for cid in ids
+        ]
+
+    def _desired_states(self, title: str, live: bool) -> Dict[CampaignKey, bool]:
+        """Desired state of every campaign: on iff some matching rule lists it.
+
+        Also records and logs per-rule match transitions.
+        """
+        desired: Dict[CampaignKey, bool] = {}
+        for idx, rule in enumerate(self.config.rules):
+            matched = live and rule.matches_title(title)
+            if matched != self._rule_enabled[idx]:
+                logger.info(
+                    "Rule '%s': %s (%d campaign(s)).",
+                    rule.name,
+                    f"live with matching title {title!r}"
+                    if matched
+                    else ("stream ended" if not live else "title no longer matches"),
+                    rule.campaign_count(),
+                )
+            self._rule_enabled[idx] = matched
+            for key in self._rule_campaigns(rule):
+                desired[key] = desired.get(key, False) or matched
+        return desired
+
+    def _toggle(self, key: CampaignKey, enable: bool) -> Optional[str]:
+        """Drive one campaign; return an error description or None on success."""
+        network, cid = key
+        client = self.clients[network]
+        try:
+            if enable:
+                client.enable_campaign(cid)
+            else:
+                client.disable_campaign(cid)
+        except Exception as exc:
+            verb = "enable" if enable else "disable"
+            logger.exception(
+                "Failed to %s %s campaign '%s'; will retry.",
+                verb,
+                NETWORKS_BY_KEY[network].label,
+                cid,
             )
-        return targets
+            self._campaign_enabled[key] = None
+            return f"{verb} {network}:{cid} ({exc!r})"
+        self._campaign_enabled[key] = enable
+        return None
 
     # ------------------------------------------------------------------
     # Single poll cycle (public for testability)
     # ------------------------------------------------------------------
 
     def check(self) -> None:
-        """Perform a single poll cycle: inspect stream state and act if needed."""
+        """Perform a single poll cycle: inspect stream state and act on edges."""
         stream = self.twitch.get_stream(self.config.twitch_channel_login)
         title = stream.get("title", "") if stream is not None else ""
 
-        for idx, rule in enumerate(self.config.rules):
-            should_enable = stream is not None and rule.matches_title(title)
-            currently_enabled = self._rule_enabled[idx]
-
-            if should_enable and not currently_enabled:
-                logger.info(
-                    "Rule '%s': stream is live with matching title '%s'. "
-                    "Enabling %d campaign(s).",
-                    rule.name,
-                    title,
-                    _rule_campaign_count(rule),
-                )
-                for _network, client, campaign_ids in self._rule_targets(rule):
-                    for campaign_id in campaign_ids:
-                        client.enable_campaign(campaign_id)
-                self._rule_enabled[idx] = True
-
-            elif not should_enable and currently_enabled:
-                reason = "stream ended" if stream is None else "title no longer matches"
-                logger.info(
-                    "Rule '%s': disabling %d campaign(s) (%s).",
-                    rule.name,
-                    _rule_campaign_count(rule),
-                    reason,
-                )
-                for _network, client, campaign_ids in self._rule_targets(rule):
-                    for campaign_id in campaign_ids:
-                        client.disable_campaign(campaign_id)
-                self._rule_enabled[idx] = False
-
-            else:
-                logger.debug(
-                    "Rule '%s': no state change (enabled=%s, should_enable=%s).",
-                    rule.name,
-                    currently_enabled,
-                    should_enable,
-                )
+        for key, want in self._desired_states(title, stream is not None).items():
+            if self._campaign_enabled.get(key, False) is want:
+                continue
+            self._toggle(key, want)
 
         # Announce last: a social post or a YouTube lookup can each sit on a
         # 30s timeout, and the campaign toggles shouldn't queue behind that on
@@ -178,53 +220,25 @@ class StreamAdMonitor:
         """Drive every campaign to its desired state for one ``(title, live)`` snapshot.
 
         This is the stateless counterpart to :meth:`check`. ``check`` runs
-        inside the polling loop and toggles a campaign only on an *edge* (it
-        diffs against the in-process ``_rule_enabled`` tracker); ``apply`` is
-        for one-shot, externally-triggered invocations — e.g. an OBS
-        streaming-start/stop hook — where the process is short-lived and there
-        is no prior state to diff against. It therefore sets the desired state
-        directly. Re-activating an already-active campaign or pausing an
-        already-paused one is idempotent on both networks.
+        inside the polling loop and toggles a campaign only on an *edge*;
+        ``apply`` is for one-shot, externally-triggered invocations — e.g. an
+        OBS streaming-start/stop hook — where the process is short-lived and
+        there is no prior state to diff against. It therefore sets every
+        campaign's desired state directly. Re-activating an already-active
+        campaign or pausing an already-paused one is idempotent.
 
         Default-deny: a campaign is enabled only when ``live`` is True **and**
-        the title matches its rule; every other case (offline, off-topic title,
-        unknown title) pauses it, so ad spend never runs on a stream that isn't
-        live and on-topic.
+        a rule listing it matches the title; every other case pauses it, so
+        ad spend never runs on a stream that isn't live and on-topic.
 
-        Every campaign is attempted even if some toggles raise, so a single
-        failure can't strand the others in the wrong state. If any toggle
+        Every campaign is attempted even if some toggles raise. If any
         failed, a :class:`RuntimeError` summarising them is raised at the end.
         """
-        errors: List[str] = []
-        for idx, rule in enumerate(self.config.rules):
-            should_enable = live and rule.matches_title(title)
-            logger.info(
-                "Rule '%s': %s %d campaign(s) (live=%s, title=%r).",
-                rule.name,
-                "enabling" if should_enable else "pausing",
-                _rule_campaign_count(rule),
-                live,
-                title,
-            )
-            for network, client, campaign_ids in self._rule_targets(rule):
-                for campaign_id in campaign_ids:
-                    try:
-                        if should_enable:
-                            client.enable_campaign(campaign_id)
-                        else:
-                            client.disable_campaign(campaign_id)
-                    except Exception as exc:
-                        verb = "enable" if should_enable else "disable"
-                        logger.exception(
-                            "Rule '%s': failed to %s %s campaign '%s'; continuing.",
-                            rule.name,
-                            verb,
-                            network,
-                            campaign_id,
-                        )
-                        errors.append(f"{verb} {network}:{campaign_id} ({exc!r})")
-            self._rule_enabled[idx] = should_enable
-
+        errors = [
+            err
+            for key, want in self._desired_states(title, live).items()
+            if (err := self._toggle(key, want)) is not None
+        ]
         if errors:
             raise RuntimeError(
                 f"{len(errors)} campaign toggle(s) failed: " + "; ".join(errors)
@@ -237,7 +251,7 @@ class StreamAdMonitor:
         such as the OBS gate should, so the headless Chromium is shut down
         promptly instead of lingering until process exit.
         """
-        for client in (self.reddit, self.trafficstars, self.twitch):
+        for client in [*self.clients.values(), self.twitch]:
             if client is None:
                 continue
             closer = getattr(client, "close", None)
@@ -253,29 +267,23 @@ class StreamAdMonitor:
     # ------------------------------------------------------------------
 
     def disable_all(self) -> None:
-        """Disable every campaign across all rules and reset internal state.
+        """Pause every campaign across all rules and reset internal state.
 
         Called once at startup to ensure no stale ads are left running from a
         previous invocation that may have crashed or been stopped mid-session.
+        A campaign that fails to pause is marked unknown, so the first poll
+        retries it if it should be off.
         """
         logger.info(
             "Startup: disabling all campaigns across %d rule(s) to ensure clean state.",
             len(self.config.rules),
         )
-        for idx, rule in enumerate(self.config.rules):
-            for network, client, campaign_ids in self._rule_targets(rule):
-                for campaign_id in campaign_ids:
-                    try:
-                        client.disable_campaign(campaign_id)
-                    except Exception:
-                        logger.exception(
-                            "Startup: failed to disable %s campaign '%s' for "
-                            "rule '%s'; continuing.",
-                            network,
-                            campaign_id,
-                            rule.name,
-                        )
-            self._rule_enabled[idx] = False
+        keys = dict.fromkeys(
+            key for rule in self.config.rules for key in self._rule_campaigns(rule)
+        )
+        for key in keys:
+            self._toggle(key, False)
+        self._rule_enabled = [False] * len(self.config.rules)
 
     # ------------------------------------------------------------------
     # Continuous monitoring loop

@@ -531,3 +531,69 @@ def test_reddit_without_cookie_jar_still_requires_login_creds():
     with patch.dict(os.environ, env, clear=True):
         with pytest.raises(ValueError, match="REDDIT_USERNAME"):
             Config()
+
+
+# ---------------------------------------------------------------------------
+# New networks and keyword options in single-rule (env) mode
+# ---------------------------------------------------------------------------
+
+
+def test_meta_only_legacy_rule_requires_meta_token():
+    env = {**TWITCH_ONLY_ENV, "META_CAMPAIGN_ID": "120"}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValueError, match="META_ACCESS_TOKEN"):
+            Config()
+
+
+def test_new_network_tokens_and_ids_are_read():
+    env = {
+        **TWITCH_ONLY_ENV,
+        "EXOCLICK_CAMPAIGN_ID": "11",
+        "EXOCLICK_API_TOKEN": "exo",
+        "PROPELLERADS_CAMPAIGN_ID": "22",
+        "PROPELLERADS_API_TOKEN": "prop",
+        "META_CAMPAIGN_ID": "120",
+        "META_ACCESS_TOKEN": "meta",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert (cfg.exoclick_api_token, cfg.propellerads_api_token, cfg.meta_access_token) == (
+        "exo",
+        "prop",
+        "meta",
+    )
+    assert cfg.rules[0].campaigns_by_network() == {
+        "exoclick": ["11"],
+        "propellerads": ["22"],
+        "meta": ["120"],
+    }
+    assert cfg.reddit_username == ""  # Reddit untouched
+
+
+def test_unused_network_tokens_are_not_required():
+    env = {**TWITCH_ONLY_ENV, "TRAFFICSTARS_CAMPAIGN_ID": "1", "TRAFFICSTARS_API_KEY": "k"}
+    with patch.dict(os.environ, env, clear=True):
+        cfg = Config()
+    assert cfg.meta_access_token == ""
+
+
+def test_legacy_trigger_match_and_excludes():
+    env = {
+        **TWITCH_ONLY_ENV,
+        "TRAFFICSTARS_CAMPAIGN_ID": "1",
+        "TRAFFICSTARS_API_KEY": "k",
+        "TRIGGER_MATCH": "substring",
+        "TRIGGER_EXCLUDE_KEYWORDS": "FHI, rerun",
+    }
+    with patch.dict(os.environ, env, clear=True):
+        rule = Config().rules[0]
+    assert rule.match == "substring"
+    assert rule.exclude_keywords == ["FHI", "rerun"]
+
+
+def test_bad_trigger_match_is_rejected():
+    env = {**TWITCH_ONLY_ENV, "REDDIT_CAMPAIGN_ID": "c", "REDDIT_COOKIE_JAR": "/j",
+           "TRIGGER_MATCH": "regex"}
+    with patch.dict(os.environ, env, clear=True):
+        with pytest.raises(ValueError, match="TRIGGER_MATCH"):
+            Config()

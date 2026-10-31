@@ -672,3 +672,102 @@ def test_ads_are_toggled_before_announcing():
     monitor.check()
 
     assert order == ["enable", "announce"]
+
+
+# ---------------------------------------------------------------------------
+# Shared campaigns, failure isolation, and the new networks
+# ---------------------------------------------------------------------------
+
+
+def _shared_rules():
+    return [
+        Rule(name="FHI", keywords=["FHI"], campaign_ids=["shared", "fhi_only"]),
+        Rule(name="Spark", keywords=["Spark"], campaign_ids=["shared", "spark_only"]),
+    ]
+
+
+def test_shared_campaign_stays_on_while_any_rule_matches():
+    monitor, twitch, reddit = _make_monitor(
+        [_live("FHI and Spark"), _live("Spark only now")], rules=_shared_rules()
+    )
+    monitor.check()
+    assert reddit.enable_campaign.call_count == 3  # shared enabled once
+    reddit.reset_mock()
+
+    monitor.check()  # FHI stops matching; Spark still needs "shared"
+    reddit.disable_campaign.assert_called_once_with("fhi_only")
+    reddit.enable_campaign.assert_not_called()
+
+
+def test_apply_does_not_let_a_later_rule_pause_a_shared_campaign():
+    monitor, twitch, reddit = _make_monitor([], rules=_shared_rules())
+    monitor.apply("FHI appeals stream", live=True)
+    reddit.enable_campaign.assert_any_call("shared")
+    assert call("shared") not in reddit.disable_campaign.call_args_list
+
+
+def test_check_failure_on_one_campaign_does_not_block_others():
+    rules = [
+        Rule(name="A", keywords=["Spark"], campaign_ids=["bad"]),
+        Rule(name="B", keywords=["Spark"], campaign_ids=["good"]),
+    ]
+    monitor, twitch, reddit = _make_monitor([_live("Spark"), None, None], rules=rules)
+    monitor.check()
+    reddit.reset_mock()
+
+    reddit.disable_campaign.side_effect = [RuntimeError("boom"), {"status": "PAUSED"}]
+    monitor.check()  # must not raise; both pauses attempted
+    assert reddit.disable_campaign.call_count == 2
+
+    reddit.reset_mock()
+    reddit.disable_campaign.side_effect = None
+    monitor.check()  # the failed one is retried, the good one is not
+    reddit.disable_campaign.assert_called_once_with("bad")
+
+
+def test_failed_startup_pause_is_retried_on_first_poll():
+    monitor, twitch, reddit = _make_monitor([None])
+    reddit.disable_campaign.side_effect = [RuntimeError("boom"), {"status": "PAUSED"}]
+    monitor.disable_all()
+    monitor.check()
+    assert reddit.disable_campaign.call_count == 2
+
+
+def test_new_networks_are_toggled_through_injected_clients():
+    rules = [
+        Rule(
+            name="FHI",
+            keywords=["FHI"],
+            meta_campaign_ids=["120"],
+            exoclick_campaign_ids=["11"],
+            propellerads_campaign_ids=["22"],
+        )
+    ]
+    cfg = _make_config(rules)
+    clients = {"meta": MagicMock(), "exoclick": MagicMock(), "propellerads": MagicMock()}
+    twitch = MagicMock()
+    twitch.get_stream.side_effect = [_live("FHI live"), None]
+    monitor = StreamAdMonitor(cfg, twitch_client=twitch, ad_clients=clients)
+
+    monitor.check()
+    clients["meta"].enable_campaign.assert_called_once_with("120")
+    clients["exoclick"].enable_campaign.assert_called_once_with("11")
+    clients["propellerads"].enable_campaign.assert_called_once_with("22")
+
+    monitor.check()
+    clients["meta"].disable_campaign.assert_called_once_with("120")
+    monitor.close()
+    clients["meta"].close.assert_called_once_with()
+
+
+def test_rest_network_clients_are_built_from_config_tokens():
+    rules = [Rule(name="FHI", keywords=["FHI"], meta_campaign_ids=["120"])]
+    cfg = _make_config(rules)
+    cfg.meta_access_token = "meta_token"
+
+    monitor = StreamAdMonitor(cfg, twitch_client=MagicMock())
+
+    from stream_ad_monitor.meta_ads_client import MetaAdsClient
+
+    assert isinstance(monitor.clients["meta"], MetaAdsClient)
+    assert monitor.reddit is None

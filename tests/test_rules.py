@@ -242,3 +242,87 @@ def test_load_rules_raises_on_non_numeric_trafficstars_id(tmp_path):
 def test_rule_reddit_campaign_ids_property_aliases_campaign_ids():
     rule = Rule(name="r", keywords=["k"], campaign_ids=["c1"])
     assert rule.reddit_campaign_ids == ["c1"]
+
+
+# ---------------------------------------------------------------------------
+# Whole-word matching, exclude keywords, and new networks
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "title, expected",
+    [
+        ("Apache Spark internals", True),
+        ("#Spark live coding", True),
+        ("Spark's new shuffle", True),
+        ("Sparkle unicorn stream", False),
+        ("SparkFun soldering", False),
+    ],
+)
+def test_word_matching_is_the_default(title, expected):
+    rule = Rule(name="spark", keywords=["Spark"], campaign_ids=["c"])
+    assert rule.matches_title(title) is expected
+
+
+def test_substring_mode_keeps_the_old_behaviour():
+    rule = Rule(name="spark", keywords=["Spark"], campaign_ids=["c"], match="substring")
+    assert rule.matches_title("SparkSQL deep dive") is True
+
+
+def test_multi_word_keyword_matches_as_a_phrase():
+    rule = Rule(name="fhi", keywords=["Fight Health Insurance"], campaign_ids=["c"])
+    assert rule.matches_title("Working on fight health insurance appeals")
+    assert not rule.matches_title("fight the health insurance company")
+
+
+def test_exclude_keywords_veto_a_match():
+    rule = Rule(
+        name="spark", keywords=["Spark"], exclude_keywords=["FHI"], campaign_ids=["c"]
+    )
+    assert rule.matches_title("Spark dev: new connector")
+    assert not rule.matches_title("Fixing FHI's Spark pipeline")
+
+
+def test_load_rules_reads_exclude_match_and_new_networks(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        textwrap.dedent(
+            """\
+            rules:
+              - name: FHI
+                keywords: [FHI, "Fight Health Insurance"]
+                exclude_keywords: Spark
+                match: substring
+                meta_campaign_ids: [120200000000001]
+                exoclick_campaign_ids: 11
+                propellerads_campaign_ids: ["22"]
+            """
+        )
+    )
+    (rule,) = load_rules_from_yaml(str(rules_yaml))
+    assert rule.exclude_keywords == ["Spark"]
+    assert rule.match == "substring"
+    assert rule.campaigns_by_network() == {
+        "exoclick": ["11"],
+        "propellerads": ["22"],
+        "meta": ["120200000000001"],
+    }
+    assert rule.campaign_count() == 3
+
+
+def test_load_rules_rejects_non_numeric_ids_on_rest_networks(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        "rules:\n  - name: x\n    keywords: [a]\n    meta_campaign_ids: [abc]\n"
+    )
+    with pytest.raises(ValueError, match="Meta"):
+        load_rules_from_yaml(str(rules_yaml))
+
+
+def test_load_rules_rejects_unknown_match_mode(tmp_path):
+    rules_yaml = tmp_path / "rules.yaml"
+    rules_yaml.write_text(
+        "rules:\n  - name: x\n    keywords: [a]\n    match: fuzzy\n    campaign_ids: [c]\n"
+    )
+    with pytest.raises(ValueError, match="match"):
+        load_rules_from_yaml(str(rules_yaml))

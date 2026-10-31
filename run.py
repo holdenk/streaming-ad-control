@@ -17,14 +17,17 @@ a threaded reply once the channel's /live page resolves to it.
 Required env vars:
   TWITCH_CLIENT_ID, TWITCH_CLIENT_SECRET, TWITCH_CHANNEL_LOGIN
   RULES_FILE   — YAML rules file (recommended), OR legacy single-rule mode:
-                 REDDIT_CAMPAIGN_ID and/or TRAFFICSTARS_CAMPAIGN_ID
-                 + optional TRIGGER_KEYWORD
+                 any of REDDIT_CAMPAIGN_ID, TRAFFICSTARS_CAMPAIGN_ID,
+                 EXOCLICK_CAMPAIGN_ID, PROPELLERADS_CAMPAIGN_ID,
+                 META_CAMPAIGN_ID + optional TRIGGER_KEYWORD,
+                 TRIGGER_EXCLUDE_KEYWORDS, TRIGGER_MATCH (word|substring)
 
 Required when any rule targets Reddit campaigns:
-  REDDIT_USERNAME, REDDIT_PASSWORD
+  REDDIT_COOKIE_JAR (bootstrapped), or REDDIT_USERNAME + REDDIT_PASSWORD
 
-Required when any rule targets TrafficStars campaigns:
-  TRAFFICSTARS_API_KEY
+Required when any rule targets that network's campaigns:
+  TRAFFICSTARS_API_KEY, EXOCLICK_API_TOKEN, PROPELLERADS_API_TOKEN,
+  META_ACCESS_TOKEN (optional META_API_VERSION)
 
 Required to announce the stream on X (all four, from the app's
 "Keys and tokens" tab; the app needs Read and write permission):

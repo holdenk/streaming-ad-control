@@ -1,42 +1,60 @@
 # rules.example.yaml
 #
 # Copy this file to rules.yaml (or any path) and set RULES_FILE to point to it.
-# Each rule maps one or more title keywords to campaigns on one or both ad
-# networks. Keyword matching is case-insensitive.
+# (Or run `python scripts/setup.py`, which writes it for you.)
 #
-# Reddit:        `campaign_ids` (alias: `reddit_campaign_ids`). Find the ID in
-#                the URL bar of the ads.reddit.com dashboard when viewing a
-#                campaign — the long numeric ID after /campaigns/.
-# TrafficStars:  `trafficstars_campaign_ids`. Find the numeric ID in the
-#                campaign list at admin.trafficstars.com. Requires
-#                TRAFFICSTARS_API_KEY in the environment.
+# One rule per stream topic: title keywords → the campaigns to run while that
+# topic is live. Matching is case-insensitive on WHOLE WORDS — "Spark" matches
+# "Apache Spark" and "#Spark" but not "sparkle" or "SparkSQL". Set
+# `match: substring` on a rule for the old any-occurrence behaviour.
+# `exclude_keywords` veto a rule. A campaign listed under several rules runs
+# while any of them matches.
 #
-# A rule may list campaigns for either network or both.
+# Campaign ID keys (any combination per rule):
+#   campaign_ids               Reddit Ads — the long number after /campaigns/
+#                              in the ads.reddit.com URL. (alias:
+#                              reddit_campaign_ids)
+#   trafficstars_campaign_ids  TrafficStars — numeric, from the campaign list.
+#                              Needs TRAFFICSTARS_API_KEY.
+#   exoclick_campaign_ids      ExoClick — numeric. Needs EXOCLICK_API_TOKEN.
+#   propellerads_campaign_ids  PropellerAds — numeric. Needs
+#                              PROPELLERADS_API_TOKEN.
+#   meta_campaign_ids          Meta (Facebook/Instagram) — the Campaign ID
+#                              column in Ads Manager. Needs META_ACCESS_TOKEN.
 #
 # Usage:
 #   export RULES_FILE=/path/to/rules.yaml
 #   python run.py
 
 rules:
-  - name: "Spark streams"
+  - name: "FHI"
     keywords:
-      - Spark
+      - FHI
+      - "Fight Health Insurance"
+    exclude_keywords:
+      - Spark                    # a title naming both topics runs neither
     campaign_ids:                # Reddit
       - "2470329120103230906"
-    trafficstars_campaign_ids:   # TrafficStars
-      - "123456"
+    meta_campaign_ids:           # Meta
+      - "120200000000000001"
 
-  - name: "Home Assistant streams"
+  - name: "Spark dev"
+    keywords:
+      - Spark
+      - PySpark
+      - SparkSQL
+    exclude_keywords:
+      - FHI
+    campaign_ids:
+      - "2470329120103231000"
+    trafficstars_campaign_ids:
+      - "123456"
+    propellerads_campaign_ids:
+      - "654321"
+
+  - name: "Home Assistant (ExoClick only)"
     keywords:
       - "home assistant"
       - homeassistant
-    campaign_ids:
-      - "2470329120103231000"
-      - "2470329120103231001"
-
-  - name: "Python streams (TrafficStars only)"
-    keywords:
-      - Python
-      - PyData
-    trafficstars_campaign_ids:
-      - "654321"
+    exoclick_campaign_ids:
+      - "777777"

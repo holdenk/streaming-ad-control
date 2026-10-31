@@ -10,7 +10,8 @@ from .announcer import (
     DEFAULT_YOUTUBE_TEMPLATE,
     AnnounceSettings,
 )
-from .rules import Rule, load_rules_from_yaml
+from .networks import NETWORKS
+from .rules import MATCH_MODES, Rule, load_rules_from_yaml
 
 logger = logging.getLogger(__name__)
 
@@ -124,6 +125,9 @@ class Config:
       optional override.
     * TrafficStars: ``TRAFFICSTARS_API_KEY`` (generate on
       https://admin.trafficstars.com/profile/)
+    * ExoClick / PropellerAds / Meta: ``EXOCLICK_API_TOKEN`` /
+      ``PROPELLERADS_API_TOKEN`` / ``META_ACCESS_TOKEN`` (see
+      :mod:`stream_ad_monitor.networks`)
 
     Go-live announcements are independent of the rules and off until
     credentials appear: set ``TWITTER_*``, ``BLUESKY_*``, and/or
@@ -161,10 +165,10 @@ class Config:
         else:
             self.rules = [self._legacy_rule_from_env()]
 
-        needs_reddit = any(rule.campaign_ids for rule in self.rules)
-        needs_trafficstars = any(
-            rule.trafficstars_campaign_ids for rule in self.rules
-        )
+        needed = {
+            key for rule in self.rules for key in rule.campaigns_by_network()
+        }
+        needs_reddit = "reddit" in needed
 
         # Reddit Ads settings — selenium drives the ads.reddit.com dashboard.
         # Optional: where to persist cookies + localStorage between runs so we
@@ -201,11 +205,18 @@ class Config:
             os.environ.get("REDDIT_PATCH_BODY_RESUME", _DEFAULT_PATCH_BODY_RESUME)
         )
 
-        # TrafficStars settings — plain REST API, authenticated with the
-        # account API key. Only required when a rule targets TrafficStars.
-        self.trafficstars_api_key: str = (
-            _require("TRAFFICSTARS_API_KEY") if needs_trafficstars else ""
-        )
+        # REST networks (TrafficStars, ExoClick, PropellerAds, Meta): one token
+        # each, only required when a rule targets that network. Sets e.g.
+        # ``self.trafficstars_api_key`` / ``self.meta_access_token``.
+        self.trafficstars_api_key: str = ""
+        self.exoclick_api_token: str = ""
+        self.propellerads_api_token: str = ""
+        self.meta_access_token: str = ""
+        for network in NETWORKS:
+            if network.credential_env is None:
+                continue
+            value = _require(network.credential_env) if network.key in needed else ""
+            setattr(self, network.config_attr, value)
 
         # Go-live announcements (X / Bluesky / Mastodon). Entirely optional:
         # with no
@@ -214,15 +225,13 @@ class Config:
 
         logger.info(
             "Config loaded: twitch_client_id=%s, reddit_user=%s, "
-            "trafficstars_key=%s, channel=%s, poll_interval=%d, rules=%d, "
+            "networks=%s, channel=%s, poll_interval=%d, rules=%d, "
             "cookie_jar=%s",
             mask_credential(self.twitch_client_id) if self.twitch_client_id else "<unused>",
             mask_credential(self.reddit_username)
             if needs_reddit and self.reddit_username
             else ("<cookie-jar>" if needs_reddit else "<unused>"),
-            mask_credential(self.trafficstars_api_key)
-            if needs_trafficstars
-            else "<unused>",
+            ",".join(n.key for n in NETWORKS if n.key in needed) or "<none>",
             self.twitch_channel_login,
             self.poll_interval,
             len(self.rules),
@@ -241,29 +250,30 @@ class Config:
     @staticmethod
     def _legacy_rule_from_env() -> Rule:
         """Synthesise a single rule from the pre-YAML environment variables."""
-        reddit_campaign_id = (
-            os.environ.get("REDDIT_CAMPAIGN_ID")
-            or os.environ.get("REDDIT_AD_GROUP_ID")
-        )
-        trafficstars_campaign_id = os.environ.get("TRAFFICSTARS_CAMPAIGN_ID")
-        if not reddit_campaign_id and not trafficstars_campaign_id:
+        ids_by_attr = {}
+        for network in NETWORKS:
+            value = os.environ.get(network.legacy_env)
+            if network.key == "reddit":
+                value = value or os.environ.get("REDDIT_AD_GROUP_ID")
+            ids_by_attr[network.rule_attr] = [_sanitize(value)] if value else []
+        if not any(ids_by_attr.values()):
+            others = ", ".join(f"'{n.legacy_env}'" for n in NETWORKS[1:])
             raise ValueError(
-                "Required environment variable 'REDDIT_CAMPAIGN_ID' (or "
-                "'TRAFFICSTARS_CAMPAIGN_ID') is not set, and no RULES_FILE "
-                "was provided."
+                "Required environment variable 'REDDIT_CAMPAIGN_ID' (or one of "
+                f"{others}) is not set, and no RULES_FILE was provided."
             )
         keyword = os.environ.get("TRIGGER_KEYWORD", "Spark")
+        match = _optional("TRIGGER_MATCH", "word").lower()
+        if match not in MATCH_MODES:
+            raise ValueError(
+                f"TRIGGER_MATCH must be one of {MATCH_MODES}, got {match!r}."
+            )
         return Rule(
             name="default",
             keywords=[keyword],
-            campaign_ids=(
-                [_sanitize(reddit_campaign_id)] if reddit_campaign_id else []
-            ),
-            trafficstars_campaign_ids=(
-                [_sanitize(trafficstars_campaign_id)]
-                if trafficstars_campaign_id
-                else []
-            ),
+            exclude_keywords=_env_list("TRIGGER_EXCLUDE_KEYWORDS"),
+            match=match,
+            **ids_by_attr,
         )
 
     @staticmethod

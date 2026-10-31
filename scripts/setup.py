@@ -6,8 +6,10 @@ env file (and optionally a rules file) at the end:
 
   1. Prerequisite checks (Python, Chromium for Reddit).
   2. How you'll drive it: polling daemon, OBS integration, or both.
-  3. Which ad networks to toggle: Reddit Ads and/or TrafficStars.
-  4. Which title keyword(s) gate which campaign(s).
+  3. Which ad networks to toggle: any of Reddit Ads, TrafficStars, ExoClick,
+     PropellerAds, and Meta (Facebook/Instagram).
+  4. One rule per stream topic (e.g. FHI, Spark dev): title keywords, exclude
+     keywords, and the campaigns each topic runs.
   5. Optional go-live announcements: X, Bluesky, Mastodon, YouTube.
   6. Writes the env file (chmod 600) and an optional rules.yaml.
   7. Offers to install deps, bootstrap the Reddit session, and verify the
@@ -38,6 +40,11 @@ from getpass import getpass
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
+
+# The network registry is stdlib-only at import time (clients load lazily),
+# so the wizard still runs before dependencies are installed.
+sys.path.insert(0, str(REPO_ROOT))
+from stream_ad_monitor.networks import NETWORKS, NETWORKS_BY_KEY, Network  # noqa: E402
 
 
 # --------------------------------------------------------------------------- #
@@ -185,25 +192,26 @@ Two ways to flip campaigns when you go live (you can use both):
     )
 
 
-def pick_networks() -> tuple[bool, bool]:
+def pick_networks() -> list[str]:
     heading("Which ad network(s) do you want to control?")
     note(
         """
-Reddit Ads has no official toggle API, so a headless Chromium logs in once and
-the session is reused. TrafficStars is a plain REST API with a static key.
-You only configure credentials for the networks you actually use.
+Pick any combination. You only configure credentials for networks you use.
+
+  • Reddit Ads    — no toggle API, so a headless Chromium logs in once and the
+                    session is reused. Most setup; good for subreddit targeting.
+  • TrafficStars  — plain REST, one API key.
+  • ExoClick      — plain REST, one API token.
+  • PropellerAds  — plain REST, one static API token (simplest of all).
+  • Meta          — Facebook/Instagram via the Marketing API, one system-user
+                    token that never expires.
         """
     )
-    which = choose(
-        "Target network(s):",
-        [
-            ("reddit", "Reddit Ads only"),
-            ("trafficstars", "TrafficStars only"),
-            ("both", "Both Reddit and TrafficStars"),
-        ],
-        default=0,
-    )
-    return which in ("reddit", "both"), which in ("trafficstars", "both")
+    while True:
+        chosen = [n.key for n in NETWORKS if yes_no(f"Use {n.label}?", n.key == "reddit")]
+        if chosen:
+            return chosen
+        print("    Pick at least one network.")
 
 
 def collect_twitch(mode: str, env: dict) -> None:
@@ -304,77 +312,203 @@ The key itself does not expire unless you regenerate it.
                                       allow_empty=False)
 
 
-def collect_rules(need_reddit: bool, need_trafficstars: bool,
-                  env: dict, state: dict) -> None:
+def collect_exoclick(env: dict) -> None:
+    heading("ExoClick")
+    note(
+        """
+Plain REST API. You create a permanent API token once; the daemon swaps it for
+short-lived session tokens on its own.
+        """
+    )
+    link("Log in → My Profile → API Tokens → create a token",
+         "https://admin.exoclick.com/")
+    link("Campaign IDs are the numbers in your campaign list",
+         "https://admin.exoclick.com/")
+    link("API reference (try calls in the browser)",
+         "https://api.exoclick.com/v2/docs/")
+    env["EXOCLICK_API_TOKEN"] = ask("EXOCLICK_API_TOKEN", secret=True,
+                                    allow_empty=False)
+
+
+def collect_propellerads(env: dict) -> None:
+    heading("PropellerAds")
+    note(
+        """
+The simplest network: one static API token sent on every request, no token
+exchange. API access may be gated on account history (e.g. a minimum spend) —
+if the Profile page shows no API token, ask PropellerAds support to enable it.
+        """
+    )
+    link("Log in → Profile → API token (copy it)",
+         "https://partners.propellerads.com/")
+    link("Campaign IDs are the numbers in your campaign list",
+         "https://partners.propellerads.com/")
+    link("API reference", "https://ssp-api.propellerads.com/v5/docs/")
+    env["PROPELLERADS_API_TOKEN"] = ask("PROPELLERADS_API_TOKEN", secret=True,
+                                        allow_empty=False)
+
+
+def collect_meta(env: dict) -> None:
+    heading("Meta (Facebook / Instagram)")
+    note(
+        """
+Uses the Marketing API with a SYSTEM USER token, which never expires. One-time
+setup in Meta Business Suite:
+
+  1. Create an app (type "Business") and add the Marketing API product.
+  2. Business Settings → Users → System users → Add (role: Admin or Employee).
+  3. On that system user: Assign assets → your ad account → "Manage campaigns".
+  4. Generate new token → pick your app → tick ads_management → copy it.
+
+Campaign IDs: Ads Manager → Campaigns tab → add the "Campaign ID" column
+(Columns → Customize columns), or open a campaign and read it from the URL.
+
+Health-related ads (e.g. FHI) can get extra review on Meta; pausing is always
+allowed, but a resumed campaign may sit in review before it delivers.
+        """
+    )
+    link("Create an app", "https://developers.facebook.com/apps/")
+    link("System users", "https://business.facebook.com/settings/system-users")
+    link("Ads Manager", "https://adsmanager.facebook.com/")
+    env["META_ACCESS_TOKEN"] = ask("META_ACCESS_TOKEN", secret=True,
+                                   allow_empty=False)
+
+
+_CREDENTIAL_COLLECTORS = {
+    "trafficstars": collect_trafficstars,
+    "exoclick": collect_exoclick,
+    "propellerads": collect_propellerads,
+    "meta": collect_meta,
+}
+
+
+def _ids(prompt: str) -> list[str]:
+    raw = ask(prompt)
+    return [i.strip() for i in raw.split(",") if i.strip()]
+
+
+def _ask_ids(network: Network, required: bool) -> list[str]:
+    while True:
+        suffix = "" if required else ", ENTER for none"
+        ids = _ids(f"  {network.label} campaign IDs (comma-separated{suffix})")
+        bad = [i for i in ids if network.numeric_ids and not i.isdigit()]
+        if bad:
+            print(f"    {network.label} IDs are numeric — find them in "
+                  f"{network.id_hint}. Got: {bad}")
+            continue
+        if ids or not required:
+            return ids
+        print("    At least one ID is required.")
+
+
+def collect_rules(networks: list[str], env: dict, state: dict) -> None:
     """Either a single keyword→campaign rule (env vars) or a rules.yaml."""
     heading("Rules: which title keyword gates which campaign(s)")
     note(
         """
-Keyword matching against the live stream title is case-insensitive. The
-simplest setup is one keyword → one (or two) campaign(s), stored as env vars.
-For multiple keywords/campaigns, write a rules.yaml instead.
+Each rule is one stream topic: title keywords → the campaigns to run while
+that topic is live. Matching is case-insensitive and on WHOLE WORDS, so
+"Spark" matches "Apache Spark" and "#Spark" but not "sparkle". Multi-word
+keywords ("Fight Health Insurance") match as a phrase.
+
+Streaming more than one topic (e.g. FHI and Spark dev)? Use one rule per
+topic — that needs a rules.yaml.
         """
     )
-    multi = yes_no("Do you need multiple keyword rules (write a rules.yaml)?",
-                   False)
+    multi = yes_no("Do you stream more than one topic (write a rules.yaml)?",
+                   True)
     if multi:
-        _collect_rules_yaml(need_reddit, need_trafficstars, env, state)
+        _collect_rules_yaml(networks, env, state)
         return
 
     keyword = ask("Trigger keyword (title must contain this to run ads)",
                   "Spark", allow_empty=False)
     env["TRIGGER_KEYWORD"] = keyword
-    if need_reddit:
-        env["REDDIT_CAMPAIGN_ID"] = ask(
-            "REDDIT_CAMPAIGN_ID (the long number from the dashboard URL)",
-            allow_empty=False)
-    if need_trafficstars:
-        env["TRAFFICSTARS_CAMPAIGN_ID"] = ask(
-            "TRAFFICSTARS_CAMPAIGN_ID (numeric, from the campaign list)",
-            allow_empty=False)
+    excludes = ask("Exclude keywords — never run ads if the title has any "
+                   "(comma-separated, ENTER for none)")
+    if excludes:
+        env["TRIGGER_EXCLUDE_KEYWORDS"] = excludes
+    for key in networks:
+        network = NETWORKS_BY_KEY[key]
+        ids = _ask_ids(network, required=True)
+        # Single-rule env mode takes one ID per network.
+        env[network.legacy_env] = ids[0]
+        if len(ids) > 1:
+            print(f"    (single-rule mode takes one ID; using {ids[0]}. "
+                  "Use a rules.yaml for more.)")
+        state.setdefault("verify_ids", {})[key] = ids[0]
 
 
-def _collect_rules_yaml(need_reddit: bool, need_trafficstars: bool,
-                        env: dict, state: dict) -> None:
+def _quote_list(items: list[str], indent: str) -> list[str]:
+    return [f'{indent}- "{i}"' for i in items]
+
+
+def _collect_rules_yaml(networks: list[str], env: dict, state: dict) -> None:
     default_path = str(Path.home() / ".config" / "streaming-ad-control"
                        / "rules.yaml")
     path = ask("Where should rules.yaml live (RULES_FILE)?", default_path,
                allow_empty=False)
-    rules_blocks: list[str] = []
+    rules: list[dict] = []
     print()
-    note("Add one rule at a time. Leave the rule name blank to finish.")
+    note("Add one rule per topic. Leave the rule name blank to finish.")
     while True:
         print()
-        name = ask(f"Rule #{len(rules_blocks) + 1} name (blank to finish)")
+        name = ask(f"Rule #{len(rules) + 1} name, e.g. 'FHI' or 'Spark dev' "
+                   "(blank to finish)")
         if not name:
-            if rules_blocks:
+            if rules:
                 break
             print("    Add at least one rule.")
             continue
-        kws = ask("  Keywords (comma-separated)", allow_empty=False)
-        block = [f'  - name: "{name}"', "    keywords:"]
-        for kw in (k.strip() for k in kws.split(",") if k.strip()):
-            block.append(f'      - "{kw}"')
-        if need_reddit:
-            ids = ask("  Reddit campaign IDs (comma-separated, ENTER for none)")
-            ids = [i.strip() for i in ids.split(",") if i.strip()]
-            if ids:
-                block.append("    campaign_ids:")
-                block += [f'      - "{i}"' for i in ids]
-        if need_trafficstars:
-            ids = ask("  TrafficStars campaign IDs (comma-separated, "
-                      "ENTER for none)")
-            ids = [i.strip() for i in ids.split(",") if i.strip()]
-            if ids:
-                block.append("    trafficstars_campaign_ids:")
-                block += [f'      - "{i}"' for i in ids]
-        rules_blocks.append("\n".join(block))
+        keywords = [k.strip() for k in
+                    ask("  Keywords (comma-separated)", allow_empty=False).split(",")
+                    if k.strip()]
+        excludes = [k.strip() for k in
+                    ask("  Exclude keywords (comma-separated, ENTER for none)").split(",")
+                    if k.strip()]
+        ids: dict[str, list[str]] = {}
+        while not ids:
+            for key in networks:
+                found = _ask_ids(NETWORKS_BY_KEY[key], required=False)
+                if found:
+                    ids[key] = found
+            if not ids:
+                print("    A rule needs at least one campaign on some network.")
+        rules.append({"name": name, "keywords": keywords,
+                      "excludes": excludes, "ids": ids})
+
+    if len(rules) > 1:
+        print()
+        note("Should a title that mentions two topics (\"Fixing FHI's Spark "
+             "job\") run only the ads of... neither? Making topics exclusive "
+             "adds each rule's keywords to the other rules' exclude list.")
+        if yes_no("Make topics mutually exclusive?", False):
+            for r in rules:
+                for other in rules:
+                    if other is not r:
+                        r["excludes"] += [k for k in other["keywords"]
+                                          if k not in r["excludes"]]
+
+    blocks = []
+    for r in rules:
+        block = [f'  - name: "{r["name"]}"', "    keywords:"]
+        block += _quote_list(r["keywords"], "      ")
+        if r["excludes"]:
+            block.append("    exclude_keywords:")
+            block += _quote_list(r["excludes"], "      ")
+        for key, found in r["ids"].items():
+            network = NETWORKS_BY_KEY[key]
+            block.append(f"    {network.yaml_keys[0]}:   # {network.label}")
+            block += _quote_list(found, "      ")
+            state.setdefault("verify_ids", {}).setdefault(key, found[0])
+        blocks.append("\n".join(block))
 
     state["rules_file_path"] = path
     state["rules_file_content"] = (
         "# Generated by scripts/setup.py\n"
-        "# Keyword matching is case-insensitive.\n"
-        "rules:\n" + "\n\n".join(rules_blocks) + "\n"
+        "# Keywords match case-insensitively on whole words. A campaign listed\n"
+        "# under several rules runs while any of them matches.\n"
+        "rules:\n" + "\n\n".join(blocks) + "\n"
     )
     env["RULES_FILE"] = path
 
@@ -487,8 +621,11 @@ _SECTIONS = [
                     "#REDDIT_USERNAME", "#REDDIT_PASSWORD",
                     "REDDIT_ADS_ACCOUNT_ID"]),
     ("TrafficStars", ["TRAFFICSTARS_API_KEY"]),
-    ("Rules", ["RULES_FILE", "TRIGGER_KEYWORD", "REDDIT_CAMPAIGN_ID",
-               "TRAFFICSTARS_CAMPAIGN_ID"]),
+    ("ExoClick", ["EXOCLICK_API_TOKEN"]),
+    ("PropellerAds", ["PROPELLERADS_API_TOKEN"]),
+    ("Meta (Facebook / Instagram)", ["META_ACCESS_TOKEN"]),
+    ("Rules", ["RULES_FILE", "TRIGGER_KEYWORD", "TRIGGER_EXCLUDE_KEYWORDS",
+               *(n.legacy_env for n in NETWORKS)]),
     ("Announcements — X (Twitter)", [
         "TWITTER_API_KEY", "TWITTER_API_SECRET", "TWITTER_ACCESS_TOKEN",
         "TWITTER_ACCESS_TOKEN_SECRET"]),
@@ -566,15 +703,14 @@ def _env_overlay_from(env: dict) -> dict:
     return {k: v for k, v in env.items() if not k.startswith("#")}
 
 
-def offer_followups(env: dict, state: dict, need_reddit: bool,
-                    need_trafficstars: bool) -> None:
+def offer_followups(env: dict, state: dict, networks: list[str]) -> None:
     heading("Next: install, bootstrap, verify")
     overlay = _env_overlay_from(env)
 
     if yes_no("Install Python dependencies now (pip install -e .)?", False):
         _run([sys.executable, "-m", "pip", "install", "-e", "."])
 
-    if need_reddit:
+    if "reddit" in networks:
         print()
         note("The Reddit bootstrap opens a real browser window to log in once "
              "and save the session. Run it on a machine with a display.")
@@ -582,16 +718,19 @@ def offer_followups(env: dict, state: dict, need_reddit: bool,
             _run([sys.executable, "scripts/bootstrap_reddit_session.py"],
                  overlay)
 
-    if need_reddit and "REDDIT_CAMPAIGN_ID" in env:
-        if yes_no("Verify Reddit toggle on your campaign (enable→disable)?",
-                  False):
-            _run([sys.executable, "scripts/test_enable_disable.py",
-                  env["REDDIT_CAMPAIGN_ID"]], overlay)
-
-    if need_trafficstars and "TRAFFICSTARS_CAMPAIGN_ID" in env:
-        if yes_no("Verify TrafficStars toggle (run→pause)?", False):
-            _run([sys.executable, "scripts/test_enable_disable_trafficstars.py",
-                  env["TRAFFICSTARS_CAMPAIGN_ID"]], overlay)
+    # One round-trip per network, on the first campaign configured for it.
+    # Each leaves the campaign PAUSED.
+    for key, cid in state.get("verify_ids", {}).items():
+        label = NETWORKS_BY_KEY[key].label
+        if not yes_no(f"Verify {label} toggle on campaign {cid} "
+                      "(enable→pause)?", False):
+            continue
+        if key == "reddit":
+            _run([sys.executable, "scripts/test_enable_disable.py", cid],
+                 overlay)
+        else:
+            _run([sys.executable, "scripts/test_enable_disable_network.py",
+                  key, cid], overlay)
 
     announces = any(k in env for k in (
         "TWITTER_API_KEY", "BLUESKY_HANDLE", "MASTODON_ACCESS_TOKEN"))
@@ -661,16 +800,18 @@ def main() -> int:
 
     try:
         mode = pick_mode()
-        need_reddit, need_trafficstars = pick_networks()
+        networks = pick_networks()
+        need_reddit = "reddit" in networks
 
         check_prerequisites(need_reddit_browser=need_reddit)
 
         collect_twitch(mode, env)
         if need_reddit:
             collect_reddit(env, state)
-        if need_trafficstars:
-            collect_trafficstars(env)
-        collect_rules(need_reddit, need_trafficstars, env, state)
+        for key in networks:
+            if key in _CREDENTIAL_COLLECTORS:
+                _CREDENTIAL_COLLECTORS[key](env)
+        collect_rules(networks, env, state)
         collect_announcements(env)
 
         # --- Review & write ---
@@ -695,7 +836,7 @@ def main() -> int:
             write_file(Path(state["rules_file_path"]).expanduser(),
                        state["rules_file_content"], 0o644)
 
-        offer_followups(env, state, need_reddit, need_trafficstars)
+        offer_followups(env, state, networks)
         print_next_steps(mode, env, env_path, state, need_reddit)
         return 0
 

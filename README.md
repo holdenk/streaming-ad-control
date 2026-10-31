@@ -3,8 +3,8 @@
 Monitors a Twitch stream, toggles ad campaigns based on the stream title, and
 announces the stream on X, Bluesky, and Mastodon when it goes live.
 
-Two ad networks are supported, each rule in `rules.yaml` can target either or
-both:
+Five ad networks are supported; each rule in `rules.yaml` can target any
+combination of them:
 
 - **Reddit Ads** — no official API access, so a headless Chromium handles
   login and cookie management, then a `requests.Session` (pre-loaded with the
@@ -15,9 +15,23 @@ both:
   acts as an OAuth2 refresh token against `POST /v1/auth/token`; campaigns
   are toggled with `PUT /v2/campaigns/run` / `PUT /v2/campaigns/pause`.
   No browser needed. ([API docs](https://docs.trafficstars.com/))
+- **ExoClick** — plain REST. A permanent API token (My Profile → API Tokens on
+  [admin.exoclick.com](https://admin.exoclick.com/)) is swapped for a session
+  bearer via `POST /v2/login`; campaigns toggle with `PUT /v2/campaigns/play`
+  / `PUT /v2/campaigns/pause`. ([API docs](https://api.exoclick.com/v2/docs/))
+- **PropellerAds** — plain REST, the simplest of all: one static API token
+  (Profile page) as a bearer header, `PUT /v5/adv/campaigns/play` /
+  `PUT /v5/adv/campaigns/stop`. API access may need some account history;
+  ask support if the Profile page shows no token.
+  ([API docs](https://ssp-api.propellerads.com/v5/docs/))
+- **Meta (Facebook / Instagram)** — the Marketing API. One non-expiring
+  system-user token with `ads_management`; a toggle is
+  `POST graph.facebook.com/v25.0/<campaign_id>` with `status=ACTIVE|PAUSED`
+  (`META_API_VERSION` overrides the version). See
+  [Meta setup](#meta-facebook--instagram-setup).
 
 Credentials are only required for networks your rules actually use — a
-TrafficStars-only setup never launches Chromium and doesn't need Reddit
+setup without Reddit never launches Chromium and doesn't need Reddit
 credentials.
 
 Go-live announcements are a separate, optional feature on the same poll loop:
@@ -151,6 +165,10 @@ REDDIT_COOKIE_JAR=/var/lib/streaming-ad-monitor/reddit-session.json
 # REDDIT_ADS_ACCOUNT_ID=...
 # Required when any rule targets TrafficStars campaigns:
 TRAFFICSTARS_API_KEY=...
+# Required when any rule targets that network:
+# EXOCLICK_API_TOKEN=...
+# PROPELLERADS_API_TOKEN=...
+# META_ACCESS_TOKEN=...
 # Optional: announce the stream on X (see "Announcing the stream" below)
 TWITTER_API_KEY=...
 TWITTER_API_SECRET=...
@@ -222,6 +240,65 @@ your login has more than one.
 admin.trafficstars.com. Put it in `rules.yaml` under
 `trafficstars_campaign_ids` (or `TRAFFICSTARS_CAMPAIGN_ID` for single-rule
 mode).
+
+**ExoClick / PropellerAds:** the numeric ID in each network's campaign list →
+`exoclick_campaign_ids` / `propellerads_campaign_ids` (single-rule:
+`EXOCLICK_CAMPAIGN_ID` / `PROPELLERADS_CAMPAIGN_ID`), with
+`EXOCLICK_API_TOKEN` / `PROPELLERADS_API_TOKEN` in the env file.
+
+**Meta:** Ads Manager → Campaigns → add the *Campaign ID* column →
+`meta_campaign_ids` (single-rule: `META_CAMPAIGN_ID`).
+
+### Meta (Facebook / Instagram) setup
+
+1. Create an app of type *Business* at
+   [developers.facebook.com/apps](https://developers.facebook.com/apps/) and
+   add the Marketing API product.
+2. [Business Settings → System users](https://business.facebook.com/settings/system-users)
+   → add one, then *Assign assets* → your ad account → *Manage campaigns*.
+3. *Generate new token* → pick the app → tick `ads_management` → set it as
+   `META_ACCESS_TOKEN`. System-user tokens don't expire.
+
+Pausing a campaign also pauses its ad sets and ads. Health-related ads can
+get extra review on Meta (and on Reddit), so a resumed campaign may sit in
+review before it delivers — test the round trip once before relying on it.
+
+## Rules: one per stream topic
+
+Streaming more than one topic — say Fight Health Insurance and Spark dev —
+means one rule per topic:
+
+```yaml
+rules:
+  - name: "FHI"
+    keywords: ["FHI", "Fight Health Insurance"]
+    exclude_keywords: ["Spark"]        # optional veto
+    campaign_ids: ["<reddit fhi>"]
+    meta_campaign_ids: ["<meta fhi>"]
+  - name: "Spark dev"
+    keywords: ["Spark", "PySpark"]
+    exclude_keywords: ["FHI"]
+    campaign_ids: ["<reddit spark>"]
+    propellerads_campaign_ids: ["<propeller spark>"]
+```
+
+- **Whole-word matching.** Keywords match case-insensitively on whole words:
+  "Spark" matches "Apache Spark", "#Spark", and "Spark's" but not "sparkle"
+  or "SparkSQL". A multi-word keyword matches as a phrase. Add the variants you
+  use (`PySpark`, `SparkSQL`) as keywords, or set `match: substring` on a rule
+  for the old any-occurrence behaviour (`TRIGGER_MATCH=substring` in
+  single-rule mode).
+- **Exclude keywords** veto a rule: a title containing any of them never runs
+  that rule's campaigns (`TRIGGER_EXCLUDE_KEYWORDS` in single-rule mode).
+- **Shared campaigns.** A campaign listed under several rules runs while *any*
+  of them matches, in both the polling daemon and the OBS gate — the rules
+  never fight over it.
+- **Failure isolation.** Each campaign toggle is independent: one network
+  erroring is logged and retried on the next poll, and never stops the other
+  campaigns from being paused or enabled.
+
+The setup wizard (`python scripts/setup.py`) builds this file for you and can
+make topics mutually exclusive automatically.
 
 ## Announcing the stream
 
@@ -371,6 +448,9 @@ account id is loaded from the jar or discovered on the fly):
 
 # TrafficStars: round-trip run→pause via the REST API
 ./venv/bin/python scripts/test_enable_disable_trafficstars.py <campaign_id>
+
+# Any REST network (trafficstars, exoclick, propellerads, meta)
+./venv/bin/python scripts/test_enable_disable_network.py meta <campaign_id>
 ```
 
 All leave the campaign PAUSED on success.
