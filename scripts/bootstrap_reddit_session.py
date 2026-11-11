@@ -5,9 +5,10 @@ Auto-navigates to login, fills your credentials, submits. Only blocks for a
 human if Reddit hits us with a CAPTCHA. On success, saves cookies +
 localStorage to ``REDDIT_COOKIE_JAR`` and exits.
 
-Required env: REDDIT_USERNAME, REDDIT_PASSWORD, REDDIT_COOKIE_JAR,
-REDDIT_ADS_ACCOUNT_ID (the id in the dashboard URL:
-ads.reddit.com/account/<id>/dashboard)
+Required env: REDDIT_COOKIE_JAR. REDDIT_USERNAME and REDDIT_PASSWORD are
+optional; if the saved session is missing or expired, the script prompts for
+any credentials not already in the environment. REDDIT_ADS_ACCOUNT_ID (the id
+in the dashboard URL: ads.reddit.com/account/<id>/dashboard) is also optional.
 
 Usage:
     set -a; source .env; set +a
@@ -20,6 +21,7 @@ import logging
 import os
 import sys
 import time
+from getpass import getpass
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -46,15 +48,11 @@ def main() -> int:
 
     username = os.environ.get("REDDIT_USERNAME", "").strip()
     password = os.environ.get("REDDIT_PASSWORD", "").strip()
-    cookie_jar_path = os.environ.get("REDDIT_COOKIE_JAR", "").strip()
+    cookie_jar_path = os.path.expanduser(os.environ.get("REDDIT_COOKIE_JAR", "").strip())
     ads_account_id = os.environ.get("REDDIT_ADS_ACCOUNT_ID", "").strip()
-    if not (username and password and cookie_jar_path):
-        print(
-            "error: REDDIT_USERNAME, REDDIT_PASSWORD, and REDDIT_COOKIE_JAR all required.",
-            file=sys.stderr,
-        )
+    if not cookie_jar_path:
+        print("error: REDDIT_COOKIE_JAR is required.", file=sys.stderr)
         return 2
-    # ads_account_id is optional; the client auto-discovers it after login.
 
     client = RedditAdClient(
         username=username,
@@ -65,11 +63,10 @@ def main() -> int:
     )
 
     try:
-        # If the jar already restores a live session, there's nothing to log in
-        # for. Re-save so a freshly-discovered account id (older jars saved it
-        # as "unknown") and refreshed cookies get persisted.
         if client._restore_session():
-            client._save_session()
+            if not client._save_session():
+                print(f"error: could not save session to {cookie_jar_path}.", file=sys.stderr)
+                return 1
             account = client.ads_account_id or "unknown"
             print(
                 f"Cookie jar at {cookie_jar_path} already has a live Reddit "
@@ -77,6 +74,22 @@ def main() -> int:
                 "refreshed and saved."
             )
             return 0
+
+        if not username or not password:
+            print("The saved Reddit session is missing or expired. Log in to refresh it.")
+            try:
+                if not username:
+                    username = input("Reddit username: ").strip()
+                if not password:
+                    password = getpass("Reddit password (input hidden): ").strip()
+            except (EOFError, KeyboardInterrupt):
+                print("\nAborted; no new session was saved.", file=sys.stderr)
+                return 130
+            if not username or not password:
+                print("error: a Reddit username and password are required.", file=sys.stderr)
+                return 2
+            client.username = username
+            client.password = password
 
         # Otherwise log in automatically with the configured credentials. The
         # client warms up via the reddit.com homepage before the login form to
@@ -124,7 +137,9 @@ def main() -> int:
                 file=sys.stderr,
             )
 
-        client._save_session()
+        if not client._save_session():
+            print(f"error: could not save session to {cookie_jar_path}.", file=sys.stderr)
+            return 1
         account = client.ads_account_id or "unknown"
         print(f"Session saved to {cookie_jar_path} (ads account: {account}).")
         return 0

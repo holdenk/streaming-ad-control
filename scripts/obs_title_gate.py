@@ -55,6 +55,7 @@ from __future__ import annotations
 import argparse
 import logging
 import os
+import shlex
 import signal
 import sys
 import tempfile
@@ -115,8 +116,16 @@ def _load_env_file(path: str) -> int:
             key, value = line.split("=", 1)
             key = key.strip()
             value = value.strip()
-            if len(value) >= 2 and value[0] == value[-1] and value[0] in ("'", '"'):
-                value = value[1:-1]
+            if value.startswith(("'", '"')):
+                try:
+                    decoded = shlex.split(value, comments=False, posix=True)
+                except ValueError:
+                    logger.warning("Ignoring env-file line with invalid quoting: %r", raw.rstrip())
+                    continue
+                if len(decoded) != 1:
+                    logger.warning("Ignoring env-file line with trailing content: %r", raw.rstrip())
+                    continue
+                value = decoded[0]
             if not key:
                 continue
             if key in os.environ:

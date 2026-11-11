@@ -108,17 +108,21 @@ Two guarantees, since the failure modes here are public:
 
 ## Quick start: the setup wizard
 
-Rather than editing the env file by hand, run the interactive wizard. It walks
-the whole setup in order — driver (daemon vs OBS), ad networks, keyword rules,
-and optional announcements — prints exactly where to click for each token, and
-writes a ready-to-use env file (and a `rules.yaml` if you need multiple rules).
-It's static: it asks questions and writes files, talking to no network service
-of its own. At the end it offers to install deps, bootstrap the Reddit session,
-and verify the toggles.
+Rather than editing the env file by hand, run the interactive wizard with
+Python 3.10 or newer. It walks the whole setup in order — driver (daemon vs
+OBS), ad networks, keyword rules, and optional announcements — prints exactly
+where to click for each token, and writes a ready-to-use env file (and a
+`rules.yaml` if you need multiple rules). Existing files are backed up.
 
 ```sh
-python scripts/setup.py
+python3 scripts/setup.py
 ```
+
+At the end it offers to create/update `.venv` and install the dependencies,
+bootstrap the Reddit session, and verify the toggles. Network calls and live
+campaign changes only happen after their individual confirmation prompts; you
+can decline them and use the printed commands later. The final screen includes
+the exact Python, env-file, rules-file, and OBS script paths to use.
 
 The manual steps below are what the wizard automates; read them to understand
 what it writes, or follow them directly if you'd rather not run the wizard.
@@ -131,7 +135,7 @@ chromedriver, but you still need Chromium itself on the host:
 ```sh
 sudo apt-get install -y chromium-browser
 # (or chromium / google-chrome — any Blink-based browser selenium can drive)
-```dotenv
+```
 
 ```sh
 # 1. Create unprivileged service user
@@ -204,24 +208,27 @@ set -a; source /etc/streaming-ad-monitor/env; set +a
 First it checks `$REDDIT_COOKIE_JAR`: if it already restores a live session,
 it prints "already bootstrapped" and exits — safe to re-run anytime.
 
-Otherwise a Chromium window opens and the script logs in automatically with
-your configured credentials. It warms up via the reddit.com homepage, waits
-for it to settle, then opens the login form and fills in your username and
-password — cold-hitting `/login` directly trips Reddit's "blocked by network
-security" page, and the homepage warm-up avoids it. If a transient block
-still occurs it backs off and retries the automated flow (no manual login).
-The one thing that needs you is a CAPTCHA: solve it in the window and press
-ENTER. On success it writes the session (cookies + localStorage) to
-`$REDDIT_COOKIE_JAR` and logs the discovered ads account id. From then on,
-the daemon restores the session headlessly with no human in the loop.
+Otherwise a Chromium window opens and the script logs in automatically. It
+prompts for any username/password not already in the environment, so you do
+not need to store the password in the env file. It warms up via the reddit.com
+homepage, waits for it to settle, then opens the login form and fills in your
+username and password — cold-hitting `/login` directly trips Reddit's "blocked
+by network security" page, and the homepage warm-up avoids it. If a transient
+block still occurs it backs off and retries the automated flow (no manual
+login). The one other thing that needs you is a CAPTCHA: solve it in the window
+and press ENTER. On success it writes the session (cookies + localStorage) to
+`$REDDIT_COOKIE_JAR` with mode `600` and logs the discovered ads account id.
+From then on, the daemon restores the session headlessly with no human in the
+loop.
 
 If the automated login is blocked on every attempt, the egress IP is likely
 flagged (VPN/datacenter reputation) — run the bootstrap from a residential
 connection.
 
-If the file path is owned by a user the daemon can't read, `chmod 644` it or
-move it. The contents are sensitive (full Reddit session) — keep that in mind
-when picking a path.
+The session file contains full Reddit login cookies. Do not make it
+world-readable. If the daemon runs as a different user, change only the file's
+owner/group so that user can read it, and keep mode `600` (or `640` when using
+a dedicated group).
 
 ## Finding your Reddit campaign IDs
 
@@ -464,7 +471,7 @@ token is read-only is much nicer here than at the top of a stream:
 
 # Actually post to every configured platform (then delete the test posts).
 ./venv/bin/python scripts/test_announce.py --title "test post, ignore"
-```dotenv
+```
 
 ## Enable the service
 

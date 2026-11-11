@@ -51,12 +51,12 @@ def main() -> int:
         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
     )
 
-    config = Config()
+    config = Config(require_twitch=False)
     announcer = build_announcer(config.twitch_channel_login, config.announce)
     if announcer is None:
         print(
-            "No announcement targets configured. Set TWITTER_* and/or "
-            "BLUESKY_* in the environment.",
+            "No announcement targets configured. Set TWITTER_*, BLUESKY_*, "
+            "and/or MASTODON_ACCESS_TOKEN in the environment.",
             file=sys.stderr,
         )
         return 2

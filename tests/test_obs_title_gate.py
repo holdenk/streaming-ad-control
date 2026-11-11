@@ -37,6 +37,20 @@ def test_load_env_file_sets_variables(tmp_path):
     assert count == 3
 
 
+def test_load_env_file_decodes_wizard_shell_quoting(tmp_path):
+    expected_password = "literal $HOME and 'apostrophe'"
+    env_file = tmp_path / "gate.env"
+    env_file.write_text(
+        f"TRIGGER_KEYWORD={gate.shlex.quote('Fight Health Insurance')}\n"
+        f"REDDIT_PASSWORD={gate.shlex.quote(expected_password)}\n"
+    )
+    with patch.dict(os.environ, {}, clear=True):
+        count = gate._load_env_file(str(env_file))
+        assert os.environ["TRIGGER_KEYWORD"] == "Fight Health Insurance"
+        assert os.environ["REDDIT_PASSWORD"] == expected_password
+    assert count == 2
+
+
 def test_load_env_file_does_not_override_existing(tmp_path):
     env_file = tmp_path / "gate.env"
     env_file.write_text("LOG_LEVEL=DEBUG\n")

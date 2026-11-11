@@ -338,17 +338,19 @@ def test_close_is_idempotent():
 
 
 def test_save_session_writes_cookies_and_local_storage(tmp_path):
-    jar = tmp_path / "jar.json"
+    jar = tmp_path / "new-directory" / "jar.json"
     driver = _fake_driver()
     driver.get_cookies.return_value = [{"name": "reddit_session", "value": "abc"}]
     driver.execute_script.return_value = {"theme": "dark"}
     client = _make_client(driver=driver, cookie_jar_path=str(jar), ads_account_id="acct123")
-    client._save_session()
+
+    assert client._save_session() is True
 
     written = json.loads(jar.read_text())
     assert written["cookies"][0]["name"] == "reddit_session"
     assert written["local_storage"] == {"theme": "dark"}
     assert written["ads_account_id"] == "acct123"
+    assert jar.stat().st_mode & 0o777 == 0o600
 
 
 def test_restore_session_loads_account_id_from_jar(tmp_path):

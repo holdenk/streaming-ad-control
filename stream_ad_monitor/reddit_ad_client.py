@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import re
 import time
 from typing import Any, NoReturn, Optional
@@ -161,7 +162,7 @@ class RedditAdClient:
         # (REDDIT_ADS_ACCOUNT_ID) just skips discovery / picks a specific
         # account when the login has more than one.
         self.ads_account_id = ads_account_id
-        self.cookie_jar_path = cookie_jar_path
+        self.cookie_jar_path = os.path.expanduser(cookie_jar_path)
         self.patch_body_pause = patch_body_pause
         self.patch_body_resume = patch_body_resume
         self.headless = headless
@@ -352,10 +353,10 @@ class RedditAdClient:
                 return
             time.sleep(_ADS_SETTLE_POLL_SEC)
 
-    def _save_session(self) -> None:
-        """Persist cookies + localStorage + account id to disk (if path set)."""
+    def _save_session(self) -> bool:
+        """Persist cookies + localStorage + account id, returning whether it saved."""
         if not self.cookie_jar_path:
-            return
+            return False
         cookies = self.driver.get_cookies()
         local_storage = self.driver.execute_script(
             "const out = {};"
@@ -365,7 +366,15 @@ class RedditAdClient:
             "} return out;"
         )
         try:
-            with open(self.cookie_jar_path, "w", encoding="utf-8") as fh:
+            parent = os.path.dirname(self.cookie_jar_path)
+            if parent:
+                os.makedirs(parent, exist_ok=True)
+            fd = os.open(
+                self.cookie_jar_path,
+                os.O_WRONLY | os.O_CREAT | os.O_TRUNC,
+                0o600,
+            )
+            with os.fdopen(fd, "w", encoding="utf-8") as fh:
                 json.dump(
                     {
                         "cookies": cookies,
@@ -374,8 +383,11 @@ class RedditAdClient:
                     },
                     fh,
                 )
+            os.chmod(self.cookie_jar_path, 0o600)
+            return True
         except OSError as exc:
             logger.warning("Could not persist cookie jar to %s: %s", self.cookie_jar_path, exc)
+            return False
 
     def _is_logged_in(self) -> bool:
         """True when we're on an ads.reddit.com dashboard URL.
